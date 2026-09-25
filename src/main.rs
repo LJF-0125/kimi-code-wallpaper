@@ -85,10 +85,138 @@ html[data-color-scheme=system] .chat-dock:before{opacity:.45 !important}
 
 // ---------- 数据结构 ----------
 
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct CropRect {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum CropAspect {
+    Ratio16x9,
+    Ratio21x9,
+    Free,
+}
+
+impl CropAspect {
+    const ALL: [CropAspect; 3] = [CropAspect::Ratio16x9, CropAspect::Ratio21x9, CropAspect::Free];
+
+    fn ratio(self) -> Option<f32> {
+        match self {
+            CropAspect::Ratio16x9 => Some(16.0 / 9.0),
+            CropAspect::Ratio21x9 => Some(21.0 / 9.0),
+            CropAspect::Free => None,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            CropAspect::Ratio16x9 => "16:9（宽屏）",
+            CropAspect::Ratio21x9 => "21:9（超宽屏）",
+            CropAspect::Free => "自由比例",
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum SlotKind {
+    Dark,
+    Light,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum CropDrag {
+    None,
+    Move,
+    Nw,
+    Ne,
+    Sw,
+    Se,
+}
+
+struct CropEditor {
+    slot: SlotKind,
+    texture: egui::TextureHandle,
+    rect: CropRect,
+    aspect: CropAspect,
+    drag: CropDrag,
+}
+
+/// 归一化空间内的居中最大选区：宽≤1、高≤1 约束下取该比例的居中最大框。
+fn centered_max_crop(aspect: Option<f32>) -> CropRect {
+    match aspect {
+        None => CropRect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 },
+        Some(r) if r >= 1.0 => {
+            let h = 1.0 / r;
+            CropRect { x: 0.0, y: (1.0 - h) / 2.0, w: 1.0, h }
+        }
+        Some(r) => {
+            let w = r;
+            CropRect { x: (1.0 - w) / 2.0, y: 0.0, w, h: 1.0 }
+        }
+    }
+}
+
+/// 保证选区在 0..1 图内，且宽/高不小于 min。
+fn clamp_crop(r: CropRect, min: f32) -> CropRect {
+    let min = min.clamp(0.0, 1.0);
+    let mut out = r;
+    out.w = out.w.clamp(min, 1.0);
+    out.h = out.h.clamp(min, 1.0);
+    out.x = out.x.clamp(0.0, 1.0 - out.w);
+    out.y = out.y.clamp(0.0, 1.0 - out.h);
+    out
+}
+
+/// 按指针位置判定拖拽命中：距某角 ≤14px 拖该角，框内移动，框外忽略。
+fn hit_test(p: egui::Pos2, r: egui::Rect) -> CropDrag {
+    let corners = [
+        (r.left_top(), CropDrag::Nw),
+        (r.right_top(), CropDrag::Ne),
+        (r.left_bottom(), CropDrag::Sw),
+        (r.right_bottom(), CropDrag::Se),
+    ];
+    for (c, d) in corners {
+        if p.distance(c) <= 14.0 {
+            return d;
+        }
+    }
+    if r.contains(p) {
+        CropDrag::Move
+    } else {
+        CropDrag::None
+    }
+}
+
+/// 被拖拽角的对角锚点（归一化坐标）。
+fn drag_anchor(r: CropRect, corner: CropDrag) -> (f32, f32) {
+    match corner {
+        CropDrag::Nw => (r.x + r.w, r.y + r.h),
+        CropDrag::Ne => (r.x, r.y + r.h),
+        CropDrag::Sw => (r.x + r.w, r.y),
+        CropDrag::Se => (r.x, r.y),
+        _ => (r.x, r.y),
+    }
+}
+
+/// 被拖拽角相对锚点的方向：选区左上角 = 锚点 + (-sx*w, -sy*h)。
+fn drag_sign(corner: CropDrag) -> (f32, f32) {
+    match corner {
+        CropDrag::Nw => (-1.0, -1.0),
+        CropDrag::Ne => (1.0, -1.0),
+        CropDrag::Sw => (-1.0, 1.0),
+        CropDrag::Se => (1.0, 1.0),
+        _ => (1.0, 1.0),
+    }
+}
+
 struct Slot {
     path: Option<PathBuf>,
     texture: Option<egui::TextureHandle>,
     alpha: f32,
+    crop: Option<CropRect>,
 }
 
 impl Slot {
@@ -97,6 +225,7 @@ impl Slot {
             path: None,
             texture: None,
             alpha,
+            crop: None,
         }
     }
 }
@@ -115,6 +244,7 @@ struct BgToolApp {
     panel_alpha: f32,
     fit_mode: FitMode,
     log: String,
+    crop_editor: Option<CropEditor>,
 }
 
 impl BgToolApp {
@@ -133,6 +263,7 @@ impl BgToolApp {
             panel_alpha: 0.25,
             fit_mode: FitMode::Cover,
             log: String::new(),
+            crop_editor: None,
         };
         app.log_push("Kimi Code 背景更换工具已启动");
         match detect_install_path() {
@@ -195,10 +326,13 @@ impl BgToolApp {
         }
     }
 
-    fn process_slot(path: &Option<PathBuf>) -> Result<Option<(String, usize, usize)>, String> {
+    fn process_slot(
+        path: &Option<PathBuf>,
+        crop: Option<CropRect>,
+    ) -> Result<Option<(String, usize, usize, Option<(u32, u32)>)>, String> {
         match path {
             None => Ok(None),
-            Some(p) => process_image(p).map(Some).map_err(|e| format!("{e:#}")),
+            Some(p) => process_image(p, crop).map(Some).map_err(|e| format!("{e:#}")),
         }
     }
 
@@ -210,28 +344,34 @@ impl BgToolApp {
                 return;
             }
         };
-        let dark = match Self::process_slot(&self.dark.path) {
+        let dark = match Self::process_slot(&self.dark.path, self.dark.crop) {
             Ok(v) => v,
             Err(e) => {
                 self.log_push(&format!("深色图片处理失败: {e}"));
                 return;
             }
         };
-        let light = match Self::process_slot(&self.light.path) {
+        let light = match Self::process_slot(&self.light.path, self.light.crop) {
             Ok(v) => v,
             Err(e) => {
                 self.log_push(&format!("浅色图片处理失败: {e}"));
                 return;
             }
         };
-        if let Some((_, orig, comp)) = &dark {
+        if let Some((_, orig, comp, cropped)) = &dark {
             self.log_push(&format!("深色图: 原始 {} 字节 -> JPEG {} 字节", orig, comp));
+            if let Some((w, h)) = cropped {
+                self.log_push(&format!("深色图: 已按选区裁剪为 {}×{} px", w, h));
+            }
             if comp > &MAX_JPEG_BYTES {
                 self.log_push("警告: 深色图压缩后仍超过 900KB，可能导致样式表过大");
             }
         }
-        if let Some((_, orig, comp)) = &light {
+        if let Some((_, orig, comp, cropped)) = &light {
             self.log_push(&format!("浅色图: 原始 {} 字节 -> JPEG {} 字节", orig, comp));
+            if let Some((w, h)) = cropped {
+                self.log_push(&format!("浅色图: 已按选区裁剪为 {}×{} px", w, h));
+            }
             if comp > &MAX_JPEG_BYTES {
                 self.log_push("警告: 浅色图压缩后仍超过 900KB，可能导致样式表过大");
             }
@@ -357,6 +497,241 @@ impl BgToolApp {
             Err(e) => self.log_push(&format!("卸载热更新失败: {e:#}")),
         }
         self.refresh();
+    }
+
+    fn open_crop_editor(&mut self, kind: SlotKind, ctx: &egui::Context) {
+        let slot = match kind {
+            SlotKind::Dark => &self.dark,
+            SlotKind::Light => &self.light,
+        };
+        let Some(path) = slot.path.clone() else { return };
+        let texture = match load_preview(ctx, &path, 1024) {
+            Ok(t) => t,
+            Err(e) => {
+                self.log_push(&format!("打开裁剪编辑器失败: {e:#}"));
+                return;
+            }
+        };
+        let aspect = CropAspect::Ratio16x9;
+        let rect = slot.crop.unwrap_or_else(|| centered_max_crop(aspect.ratio()));
+        self.crop_editor = Some(CropEditor {
+            slot: kind,
+            texture,
+            rect,
+            aspect,
+            drag: CropDrag::None,
+        });
+    }
+
+    fn show_crop_editor(&mut self, ctx: &egui::Context) {
+        #[derive(PartialEq)]
+        enum CropAction {
+            None,
+            Confirm,
+            Clear,
+        }
+        let Some(mut editor) = self.crop_editor.take() else { return };
+        let title = match editor.slot {
+            SlotKind::Dark => "裁剪壁纸 - 深色背景",
+            SlotKind::Light => "裁剪壁纸 - 浅色背景",
+        };
+        let mut open = true;
+        let mut cancel = false;
+        let mut action = CropAction::None;
+        egui::Window::new(title)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .open(&mut open)
+            .show(ctx, |ui| {
+                let prev_aspect = editor.aspect;
+                egui::ComboBox::from_label("裁剪比例")
+                    .selected_text(editor.aspect.label())
+                    .show_ui(ui, |ui| {
+                        for a in CropAspect::ALL {
+                            ui.selectable_value(&mut editor.aspect, a, a.label());
+                        }
+                    });
+                // 显示区：按图片比例适配到最大约 680×420
+                let tex_size = editor.texture.size_vec2();
+                let scale = (680.0 / tex_size.x).min(420.0 / tex_size.y).min(1.0);
+                let disp_size = tex_size * scale;
+                let min_norm = 40.0 / disp_size.x.min(disp_size.y);
+                if editor.aspect != prev_aspect {
+                    // 保持选区中心，按新比例重新适配并 clamp
+                    let cx = editor.rect.x + editor.rect.w / 2.0;
+                    let cy = editor.rect.y + editor.rect.h / 2.0;
+                    editor.rect = match editor.aspect.ratio() {
+                        Some(r) => {
+                            let mut w = editor.rect.w.min(1.0);
+                            let mut h = w / r;
+                            if h > 1.0 {
+                                h = 1.0;
+                                w = h * r;
+                            }
+                            clamp_crop(
+                                CropRect { x: cx - w / 2.0, y: cy - h / 2.0, w, h },
+                                min_norm,
+                            )
+                        }
+                        None => clamp_crop(editor.rect, min_norm),
+                    };
+                }
+                ui.label("拖动红框移动，拖动四角缩放");
+                let (img_rect, response) =
+                    ui.allocate_exact_size(disp_size, egui::Sense::drag());
+                let to_screen = |r: &CropRect| {
+                    egui::Rect::from_min_size(
+                        img_rect.min + egui::vec2(r.x * img_rect.width(), r.y * img_rect.height()),
+                        egui::vec2(r.w * img_rect.width(), r.h * img_rect.height()),
+                    )
+                };
+                // 拖拽：开始时判定命中区，一次拖拽期间不重新判定
+                if response.drag_started() {
+                    editor.drag = match response.interact_pointer_pos() {
+                        Some(p) => hit_test(p, to_screen(&editor.rect)),
+                        None => CropDrag::None,
+                    };
+                }
+                if response.dragged() {
+                    let delta = ctx.input(|i| i.pointer.delta());
+                    if let Some(p) = response.interact_pointer_pos() {
+                        match editor.drag {
+                            CropDrag::Move => {
+                                editor.rect.x += delta.x / img_rect.width();
+                                editor.rect.y += delta.y / img_rect.height();
+                            }
+                            corner @ (CropDrag::Nw | CropDrag::Ne | CropDrag::Sw | CropDrag::Se) => {
+                                let (ax, ay) = drag_anchor(editor.rect, corner);
+                                let (sx, sy) = drag_sign(corner);
+                                let px = (p.x - img_rect.min.x) / img_rect.width();
+                                let py = (p.y - img_rect.min.y) / img_rect.height();
+                                let dx = (px - ax).abs();
+                                let dy = (py - ay).abs();
+                                let ratio = editor.aspect.ratio();
+                                let (mut w, mut h) = match ratio {
+                                    Some(r) => {
+                                        // 取与指针偏移更吻合的轴驱动，保持比例
+                                        let (w1, h1) = (dx, dx / r);
+                                        let (w2, h2) = (dy * r, dy);
+                                        if (dy - h1).abs() <= (dx - w2).abs() {
+                                            (w1, h1)
+                                        } else {
+                                            (w2, h2)
+                                        }
+                                    }
+                                    None => (dx, dy),
+                                };
+                                if w < min_norm {
+                                    w = min_norm;
+                                    if let Some(r) = ratio {
+                                        h = w / r;
+                                    }
+                                }
+                                if h < min_norm {
+                                    h = min_norm;
+                                    if let Some(r) = ratio {
+                                        w = h * r;
+                                    }
+                                }
+                                if w > 1.0 {
+                                    w = 1.0;
+                                    if let Some(r) = ratio {
+                                        h = w / r;
+                                    }
+                                }
+                                if h > 1.0 {
+                                    h = 1.0;
+                                    if let Some(r) = ratio {
+                                        w = h * r;
+                                    }
+                                }
+                                let x = if sx > 0.0 { ax } else { ax - w };
+                                let y = if sy > 0.0 { ay } else { ay - h };
+                                editor.rect = clamp_crop(CropRect { x, y, w, h }, min_norm);
+                            }
+                            CropDrag::None => {}
+                        }
+                        editor.rect = clamp_crop(editor.rect, min_norm);
+                    }
+                }
+                if response.drag_stopped() {
+                    editor.drag = CropDrag::None;
+                }
+                // 绘制：纹理、框外四块半透明遮罩、红框描边、四角把手
+                let painter = ui.painter_at(img_rect);
+                painter.image(
+                    editor.texture.id(),
+                    img_rect,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    egui::Color32::WHITE,
+                );
+                let cr = to_screen(&editor.rect);
+                let mask = egui::Color32::from_black_alpha(140);
+                let lr = egui::Rect::from_min_max(img_rect.min, egui::pos2(cr.min.x, img_rect.max.y));
+                let rr = egui::Rect::from_min_max(egui::pos2(cr.max.x, img_rect.min.y), img_rect.max);
+                let tr = egui::Rect::from_min_max(egui::pos2(cr.min.x, img_rect.min.y), egui::pos2(cr.max.x, cr.min.y));
+                let br = egui::Rect::from_min_max(egui::pos2(cr.min.x, cr.max.y), egui::pos2(cr.max.x, img_rect.max.y));
+                for m in [tr, br, lr, rr] {
+                    if m.is_positive() {
+                        painter.rect_filled(m, 0.0, mask);
+                    }
+                }
+                painter.rect_stroke(
+                    cr,
+                    0.0,
+                    egui::Stroke::new(2.0_f32, egui::Color32::RED),
+                    egui::StrokeKind::Inside,
+                );
+                for c in [cr.left_top(), cr.right_top(), cr.left_bottom(), cr.right_bottom()] {
+                    painter.rect_filled(
+                        egui::Rect::from_center_size(c, egui::vec2(10.0, 10.0)),
+                        0.0,
+                        egui::Color32::RED,
+                    );
+                }
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button("确定").clicked() {
+                        action = CropAction::Confirm;
+                    }
+                    if ui.button("取消").clicked() {
+                        cancel = true;
+                    }
+                    if ui.button("重置选区").clicked() {
+                        editor.rect = centered_max_crop(editor.aspect.ratio());
+                        editor.drag = CropDrag::None;
+                    }
+                    if ui.button("清除裁剪").clicked() {
+                        action = CropAction::Clear;
+                    }
+                });
+            });
+        match action {
+            CropAction::Confirm => {
+                let slot = match editor.slot {
+                    SlotKind::Dark => &mut self.dark,
+                    SlotKind::Light => &mut self.light,
+                };
+                slot.crop = Some(editor.rect);
+                self.log_push("已保存裁剪选区");
+                self.crop_editor = None;
+            }
+            CropAction::Clear => {
+                let slot = match editor.slot {
+                    SlotKind::Dark => &mut self.dark,
+                    SlotKind::Light => &mut self.light,
+                };
+                slot.crop = None;
+                self.log_push("已清除裁剪选区");
+                self.crop_editor = None;
+            }
+            CropAction::None => {
+                if open && !cancel {
+                    self.crop_editor = Some(editor);
+                }
+            }
+        }
     }
 }
 
@@ -698,13 +1073,26 @@ fn remove_hook(index_html_content: &str) -> String {
 
 // ---------- 图片处理 ----------
 
-fn process_image(path: &Path) -> anyhow::Result<(String, usize, usize)> {
+fn process_image(path: &Path, crop: Option<CropRect>) -> anyhow::Result<(String, usize, usize, Option<(u32, u32)>)> {
     use base64::Engine as _;
     use image::ImageEncoder;
 
     let data = fs::read(path).with_context(|| format!("读取图片失败: {}", path.display()))?;
     let orig_len = data.len();
     let img = image::load_from_memory(&data).context("解析图片失败（格式不支持或文件损坏）")?;
+    // 先按归一化选区裁剪，再走现有缩放/JPEG 流程
+    let (img, cropped) = if let Some(c) = crop {
+        let iw = img.width();
+        let ih = img.height();
+        let x = (c.x * iw as f32).round().clamp(0.0, iw.saturating_sub(1) as f32) as u32;
+        let y = (c.y * ih as f32).round().clamp(0.0, ih.saturating_sub(1) as f32) as u32;
+        let w = (c.w * iw as f32).round().clamp(1.0, iw.saturating_sub(x) as f32) as u32;
+        let h = (c.h * ih as f32).round().clamp(1.0, ih.saturating_sub(y) as f32) as u32;
+        let buf = image::imageops::crop_imm(&img, x, y, w, h).to_image();
+        (image::DynamicImage::ImageRgba8(buf), Some((w, h)))
+    } else {
+        (img, None)
+    };
     let (w, h) = (img.width(), img.height());
     let rgba = if w.max(h) > MAX_TEXTURE_SIDE {
         let (nw, nh) = if w >= h {
@@ -736,13 +1124,13 @@ fn process_image(path: &Path) -> anyhow::Result<(String, usize, usize)> {
     }
     let comp_len = buf.len();
     let b64 = base64::engine::general_purpose::STANDARD.encode(&buf);
-    Ok((b64, orig_len, comp_len))
+    Ok((b64, orig_len, comp_len, cropped))
 }
 
-fn load_preview(ctx: &egui::Context, path: &Path) -> anyhow::Result<egui::TextureHandle> {
+fn load_preview(ctx: &egui::Context, path: &Path, max_side: u32) -> anyhow::Result<egui::TextureHandle> {
     let img = image::open(path).context("预览加载失败")?;
     let (w, h) = (img.width(), img.height());
-    let scale = 240.0 / w.max(h) as f32;
+    let scale = max_side as f32 / w.max(h) as f32;
     let (nw, nh) = if scale < 1.0 {
         (
             ((w as f32 * scale).round() as u32).max(1),
@@ -765,7 +1153,8 @@ fn load_preview(ctx: &egui::Context, path: &Path) -> anyhow::Result<egui::Textur
 
 // ---------- UI ----------
 
-fn slot_ui(ui: &mut egui::Ui, title: &str, slot: &mut Slot, ctx: &egui::Context, log: &mut String) {
+fn slot_ui(ui: &mut egui::Ui, title: &str, slot: &mut Slot, ctx: &egui::Context, log: &mut String) -> bool {
+    let mut crop_requested = false;
     ui.group(|ui| {
         ui.label(egui::RichText::new(title).strong());
         let size = egui::vec2(230.0, 132.0);
@@ -786,16 +1175,20 @@ fn slot_ui(ui: &mut egui::Ui, title: &str, slot: &mut Slot, ctx: &egui::Context,
                 egui::Color32::GRAY,
             );
         }
+        if slot.crop.is_some() {
+            ui.colored_label(egui::Color32::from_rgb(120, 220, 120), "已裁剪");
+        }
         ui.horizontal(|ui| {
             if ui.button("选择图片").clicked() {
                 let picked = rfd::FileDialog::new()
                     .add_filter("图片文件", &["png", "jpg", "jpeg", "webp", "bmp", "gif"])
                     .pick_file();
                 if let Some(f) = picked {
-                    match load_preview(ctx, &f) {
+                    match load_preview(ctx, &f, 240) {
                         Ok(tex) => {
                             slot.path = Some(f.clone());
                             slot.texture = Some(tex);
+                            slot.crop = None;
                             log.push_str(&format!("已选择{}图片: {}\n", title, f.display()));
                         }
                         Err(e) => log.push_str(&format!("加载预览失败: {e:#}\n")),
@@ -805,6 +1198,13 @@ fn slot_ui(ui: &mut egui::Ui, title: &str, slot: &mut Slot, ctx: &egui::Context,
             if ui.button("清除").clicked() {
                 slot.path = None;
                 slot.texture = None;
+                slot.crop = None;
+            }
+            if ui
+                .add_enabled(slot.path.is_some(), egui::Button::new("裁剪..."))
+                .clicked()
+            {
+                crop_requested = true;
             }
         });
         ui.add(
@@ -813,6 +1213,7 @@ fn slot_ui(ui: &mut egui::Ui, title: &str, slot: &mut Slot, ctx: &egui::Context,
                 .fixed_decimals(2),
         );
     });
+    crop_requested
 }
 
 impl eframe::App for BgToolApp {
@@ -876,11 +1277,19 @@ impl eframe::App for BgToolApp {
             ui.separator();
 
             let mut log = std::mem::take(&mut self.log);
+            let mut crop_req: Option<SlotKind> = None;
             ui.columns(2, |cols| {
-                slot_ui(&mut cols[0], "深色背景", &mut self.dark, ctx, &mut log);
-                slot_ui(&mut cols[1], "浅色背景", &mut self.light, ctx, &mut log);
+                if slot_ui(&mut cols[0], "深色背景", &mut self.dark, ctx, &mut log) {
+                    crop_req = Some(SlotKind::Dark);
+                }
+                if slot_ui(&mut cols[1], "浅色背景", &mut self.light, ctx, &mut log) {
+                    crop_req = Some(SlotKind::Light);
+                }
             });
             self.log = log;
+            if let Some(kind) = crop_req {
+                self.open_crop_editor(kind, ctx);
+            }
 
             ui.add(
                 egui::Slider::new(&mut self.side_alpha, 0.0..=0.95)
@@ -942,6 +1351,8 @@ impl eframe::App for BgToolApp {
                     );
                 });
         });
+
+        self.show_crop_editor(ctx);
     }
 }
 
@@ -1037,7 +1448,7 @@ mod tests {
         let img_path = root.join("dark.png");
         make_test_image(&img_path);
 
-        let (b64, orig_len, comp_len) = process_image(&img_path).unwrap();
+        let (b64, orig_len, comp_len, _) = process_image(&img_path, None).unwrap();
         assert!(orig_len > 0 && comp_len > 0);
         assert!(!b64.is_empty());
 
@@ -1077,8 +1488,8 @@ mod tests {
         let light_png = root.join("light.png");
         make_test_image(&dark_png);
         make_test_image(&light_png);
-        let (d64, _, _) = process_image(&dark_png).unwrap();
-        let (l64, _, _) = process_image(&light_png).unwrap();
+        let (d64, _, _, _) = process_image(&dark_png, None).unwrap();
+        let (l64, _, _, _) = process_image(&light_png, None).unwrap();
 
         let patch = build_patch(Some((&d64, 0.80)), Some((&l64, 0.78)), 0.55, 0.25, FitMode::Cover).unwrap();
         apply_patch(&root, Some(&patch)).unwrap();
@@ -1117,7 +1528,7 @@ mod tests {
         let (root, css_path) = make_fixture("restore");
         let img_path = root.join("dark.png");
         make_test_image(&img_path);
-        let (b64, _, _) = process_image(&img_path).unwrap();
+        let (b64, _, _, _) = process_image(&img_path, None).unwrap();
         let patch = build_patch(Some((&b64, 0.80)), None, 0.55, 0.25, FitMode::Cover).unwrap();
         apply_patch(&root, Some(&patch)).unwrap();
         assert!(fs::read_to_string(&css_path).unwrap().contains(PATCH_START));
@@ -1228,5 +1639,84 @@ mod tests {
         write_hot_files(&dist, "").unwrap();
         assert_eq!(fs::read_to_string(hot_css_path(&dist)).unwrap(), "");
         assert_eq!(read_v(), 100000000000001, "空 css 后 v 应继续 +1");
+    }
+
+    #[test]
+    fn test_centered_max_crop_16x9() {
+        let r = centered_max_crop(Some(16.0 / 9.0));
+        assert!((r.w - 1.0).abs() < 1e-6, "16:9 时宽应铺满");
+        assert!((r.h - 9.0 / 16.0).abs() < 1e-6, "16:9 时高应为 9/16");
+        assert_eq!(r.x, 0.0);
+        assert!(
+            (r.y - (1.0 - 9.0 / 16.0) / 2.0).abs() < 1e-6,
+            "y 应垂直居中"
+        );
+    }
+
+    #[test]
+    fn test_centered_max_crop_21x9() {
+        let r = centered_max_crop(CropAspect::Ratio21x9.ratio());
+        assert!((r.w - 1.0).abs() < 1e-6);
+        assert!((r.h - 9.0 / 21.0).abs() < 1e-6, "21:9 时高应为 9/21");
+        assert!(r.h < 9.0 / 16.0, "21:9 应比 16:9 更扁");
+        assert!((r.y - (1.0 - r.h) / 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_centered_max_crop_free() {
+        let r = centered_max_crop(CropAspect::Free.ratio());
+        assert_eq!(r, CropRect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 });
+        assert!(CropAspect::Free.ratio().is_none());
+    }
+
+    #[test]
+    fn test_clamp_crop_pulls_back_inside() {
+        let r = clamp_crop(CropRect { x: -0.2, y: 0.9, w: 0.5, h: 0.5 }, 0.05);
+        assert_eq!(r.x, 0.0, "负坐标应回缩到 0");
+        assert!((r.y + r.h) <= 1.0 + 1e-6, "底部越界应回缩");
+        assert!(r.y >= 0.0);
+    }
+
+    #[test]
+    fn test_clamp_crop_min_size_and_bounds() {
+        let r = clamp_crop(CropRect { x: 0.5, y: 0.5, w: 0.01, h: 0.01 }, 0.2);
+        assert!((r.w - 0.2).abs() < 1e-6, "宽不应小于 min");
+        assert!((r.h - 0.2).abs() < 1e-6, "高不应小于 min");
+        assert!(r.x + r.w <= 1.0 + 1e-6);
+        assert!(r.y + r.h <= 1.0 + 1e-6);
+        let full = clamp_crop(CropRect { x: 0.0, y: 0.0, w: 1.5, h: 2.0 }, 0.05);
+        assert_eq!(full.w, 1.0);
+        assert_eq!(full.h, 1.0);
+    }
+
+    #[test]
+    fn test_process_image_with_crop() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("test-fixture").join("crop-img");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let img_path = dir.join("src.png");
+        make_test_image(&img_path); // 32×32
+
+        let (_, _, _, cropped) =
+            process_image(&img_path, Some(CropRect { x: 0.25, y: 0.25, w: 0.5, h: 0.5 })).unwrap();
+        assert_eq!(cropped, Some((16, 16)), "应裁剪为中央 16×16");
+
+        let (b64, _, _, cropped) =
+            process_image(&img_path, Some(CropRect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 })).unwrap();
+        assert_eq!(cropped, Some((32, 32)), "全图裁剪等于原尺寸");
+        assert!(!b64.is_empty());
+
+        let (b64_full, _, _, cropped) = process_image(&img_path, None).unwrap();
+        assert!(cropped.is_none());
+        assert!(!b64_full.is_empty());
+
+        // 越界选区应被 clamp，不 panic
+        let (b64_clamped, _, _, cropped) =
+            process_image(&img_path, Some(CropRect { x: 0.9, y: 0.9, w: 0.5, h: 0.5 })).unwrap();
+        assert!(cropped.is_some());
+        let (w, h) = cropped.unwrap();
+        assert!(w >= 1 && h >= 1);
+        assert!(w <= 32 && h <= 32);
+        assert!(!b64_clamped.is_empty());
     }
 }

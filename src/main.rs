@@ -30,14 +30,14 @@ const HOT_HOOK_BLOCK: &str = r#"    <!-- === kimi-wallpaper-hot-hook === -->
           if (el.textContent !== css) el.textContent = css;
         }
         function tick() {
-          fetch('kimi-wallpaper-hot.json?_=' + Date.now(), { cache: 'no-store' })
+          fetch('/kimi-wallpaper-hot.json?_=' + Date.now(), { cache: 'no-store' })
             .then(function (r) {
               if (!r.ok) return null;
               return r.json();
             })
             .then(function (j) {
               if (!j || typeof j.v === 'undefined' || j.v === cur) return;
-              return fetch('kimi-wallpaper-hot.css?v=' + encodeURIComponent(j.v), { cache: 'no-store' })
+              return fetch('/kimi-wallpaper-hot.css?v=' + encodeURIComponent(j.v), { cache: 'no-store' })
                 .then(function (rc) { return rc.ok ? rc.text() : ''; })
                 .then(function (css) { applyCss(css); cur = j.v; });
             })
@@ -1099,6 +1099,11 @@ mod tests {
         assert!(installed.contains(HOT_HOOK_START));
         assert!(installed.contains(HOT_HOOK_END));
         assert!(installed.contains("setInterval(tick, 2000)"));
+        assert!(
+            installed.contains("fetch('/kimi-wallpaper-hot.json"),
+            "探针必须用绝对路径拉取版本文件，否则进入 /sessions/ 路由后会 404 失效"
+        );
+        assert!(installed.contains("fetch('/kimi-wallpaper-hot.css"));
         assert_eq!(
             installed.matches("kimi-wallpaper-hot-hook").count(),
             2,

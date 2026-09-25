@@ -12,16 +12,57 @@ const PATCH_END_MARK: &str = "kimi-wallpaper-patch end === */";
 const MAX_TEXTURE_SIDE: u32 = 2560;
 const MAX_JPEG_BYTES: usize = 900 * 1024;
 
+const HOT_HOOK_START: &str = "<!-- === kimi-wallpaper-hot-hook === -->";
+const HOT_HOOK_END: &str = "<!-- === kimi-wallpaper-hot-hook end === -->";
+
+const HOT_HOOK_BLOCK: &str = r#"    <!-- === kimi-wallpaper-hot-hook === -->
+    <script>
+      (function () {
+        var STYLE_ID = 'kimi-wallpaper-hot-style';
+        var cur = null;
+        function applyCss(css) {
+          var el = document.getElementById(STYLE_ID);
+          if (!el) {
+            el = document.createElement('style');
+            el.id = STYLE_ID;
+            document.head.appendChild(el);
+          }
+          if (el.textContent !== css) el.textContent = css;
+        }
+        function tick() {
+          fetch('kimi-wallpaper-hot.json?_=' + Date.now(), { cache: 'no-store' })
+            .then(function (r) {
+              if (!r.ok) return null;
+              return r.json();
+            })
+            .then(function (j) {
+              if (!j || typeof j.v === 'undefined' || j.v === cur) return;
+              return fetch('kimi-wallpaper-hot.css?v=' + encodeURIComponent(j.v), { cache: 'no-store' })
+                .then(function (rc) { return rc.ok ? rc.text() : ''; })
+                .then(function (css) { applyCss(css); cur = j.v; });
+            })
+            .catch(function () { /* hot files absent: keep last applied state */ });
+        }
+        tick();
+        setInterval(tick, 2000);
+      })();
+    </script>
+    <!-- === kimi-wallpaper-hot-hook end === -->"#;
+
 const DARK_TEMPLATE: &str = r#":root{--kimi-wallpaper-dark:url("data:image/jpeg;base64,{B64}")}
 html[data-color-scheme=dark]{background-color:#0a0a10;background-image:linear-gradient(rgba(7,7,13,{DA}),rgba(7,7,13,{DA})),var(--kimi-wallpaper-dark) !important;background-size:cover,cover;background-position:center,center;background-repeat:no-repeat,no-repeat;background-attachment:fixed,fixed}
 html[data-color-scheme=dark] .app,html[data-color-scheme=dark] .con,html[data-color-scheme=dark] body,html[data-color-scheme=dark] #app{background:transparent !important}
 html[data-color-scheme=dark] .side,html[data-color-scheme=dark] .windows-titlebar{background:rgba(10,10,17,{SA}) !important}
 html[data-color-scheme=dark] .global-preview,html[data-color-scheme=dark] .agent-panel,html[data-color-scheme=dark] .global-preview .file-preview,html[data-color-scheme=dark] .global-preview .fp-body,html[data-color-scheme=dark] .global-preview .ui-panel-header{background:rgba(10,10,17,{PA}) !important}
+html[data-color-scheme=dark] .chat-header,html[data-color-scheme=dark] .topbar{background:rgba(10,10,17,{PA}) !important}
+html[data-color-scheme=dark] .chat-dock:before{opacity:.45 !important}
 @media (prefers-color-scheme:dark){
 html[data-color-scheme=system]{background-color:#0a0a10;background-image:linear-gradient(rgba(7,7,13,{DA}),rgba(7,7,13,{DA})),var(--kimi-wallpaper-dark) !important;background-size:cover,cover;background-position:center,center;background-repeat:no-repeat,no-repeat;background-attachment:fixed,fixed}
 html[data-color-scheme=system] .app,html[data-color-scheme=system] .con,html[data-color-scheme=system] body,html[data-color-scheme=system] #app{background:transparent !important}
 html[data-color-scheme=system] .side,html[data-color-scheme=system] .windows-titlebar{background:rgba(10,10,17,{SA}) !important}
 html[data-color-scheme=system] .global-preview,html[data-color-scheme=system] .agent-panel,html[data-color-scheme=system] .global-preview .file-preview,html[data-color-scheme=system] .global-preview .fp-body,html[data-color-scheme=system] .global-preview .ui-panel-header{background:rgba(10,10,17,{PA}) !important}
+html[data-color-scheme=system] .chat-header,html[data-color-scheme=system] .topbar{background:rgba(10,10,17,{PA}) !important}
+html[data-color-scheme=system] .chat-dock:before{opacity:.45 !important}
 }
 "#;
 
@@ -30,11 +71,15 @@ html[data-color-scheme=light]{background-color:#f5f5f7;background-image:linear-g
 html[data-color-scheme=light] .app,html[data-color-scheme=light] .con,html[data-color-scheme=light] body,html[data-color-scheme=light] #app{background:transparent !important}
 html[data-color-scheme=light] .side,html[data-color-scheme=light] .windows-titlebar{background:rgba(255,255,255,{SA}) !important}
 html[data-color-scheme=light] .global-preview,html[data-color-scheme=light] .agent-panel,html[data-color-scheme=light] .global-preview .file-preview,html[data-color-scheme=light] .global-preview .fp-body,html[data-color-scheme=light] .global-preview .ui-panel-header{background:rgba(255,255,255,{PA}) !important}
+html[data-color-scheme=light] .chat-header,html[data-color-scheme=light] .topbar{background:rgba(255,255,255,{PA}) !important}
+html[data-color-scheme=light] .chat-dock:before{opacity:.45 !important}
 @media (prefers-color-scheme:light){
 html[data-color-scheme=system]{background-color:#f5f5f7;background-image:linear-gradient(rgba(250,250,252,{LA}),rgba(250,250,252,{LA})),var(--kimi-wallpaper-light) !important;background-size:cover,cover;background-position:center,center;background-repeat:no-repeat,no-repeat;background-attachment:fixed,fixed}
 html[data-color-scheme=system] .app,html[data-color-scheme=system] .con,html[data-color-scheme=system] body,html[data-color-scheme=system] #app{background:transparent !important}
 html[data-color-scheme=system] .side,html[data-color-scheme=system] .windows-titlebar{background:rgba(255,255,255,{SA}) !important}
 html[data-color-scheme=system] .global-preview,html[data-color-scheme=system] .agent-panel,html[data-color-scheme=system] .global-preview .file-preview,html[data-color-scheme=system] .global-preview .fp-body,html[data-color-scheme=system] .global-preview .ui-panel-header{background:rgba(255,255,255,{PA}) !important}
+html[data-color-scheme=system] .chat-header,html[data-color-scheme=system] .topbar{background:rgba(255,255,255,{PA}) !important}
+html[data-color-scheme=system] .chat-dock:before{opacity:.45 !important}
 }
 "#;
 
@@ -62,6 +107,7 @@ struct BgToolApp {
     css_name: Option<String>,
     patched: bool,
     bak_exists: bool,
+    hot_enabled: bool,
     status_err: Option<String>,
     dark: Slot,
     light: Slot,
@@ -78,6 +124,7 @@ impl BgToolApp {
             css_name: None,
             patched: false,
             bak_exists: false,
+            hot_enabled: false,
             status_err: None,
             dark: Slot::new(0.80),
             light: Slot::new(0.78),
@@ -109,6 +156,7 @@ impl BgToolApp {
         self.css_name = None;
         self.patched = false;
         self.bak_exists = false;
+        self.hot_enabled = false;
         self.status_err = None;
         self.root = None;
 
@@ -125,6 +173,10 @@ impl BgToolApp {
             }
         };
         self.root = Some(root.clone());
+        let dist = root.join("resources").join("desktop-dist");
+        if let Ok(index_html) = fs::read_to_string(dist.join("index.html")) {
+            self.hot_enabled = hook_installed(&index_html);
+        }
         match locate_main_css(&root) {
             Ok(css) => {
                 self.css_name = Some(
@@ -195,7 +247,17 @@ impl BgToolApp {
                 } else {
                     self.log_push("两个槽位均为空，已移除补丁（纯还原）");
                 }
-                self.log_push("请重启 Kimi Code 生效");
+                let dist = root.join("resources").join("desktop-dist");
+                match write_hot_files(&dist, patch.as_deref().unwrap_or("")) {
+                    Ok(_) => {
+                        if self.hot_enabled {
+                            self.log_push("热更新已推送：运行中的 Kimi Code 约 2 秒内自动生效，无需重启");
+                        } else {
+                            self.log_push("需重启 Kimi Code 生效（或点「安装热更新」，之后无需重启）");
+                        }
+                    }
+                    Err(e) => self.log_push(&format!("热更文件写入失败: {e:#}")),
+                }
             }
             Err(e) => self.log_push(&format!("应用补丁失败: {e:#}")),
         }
@@ -213,9 +275,83 @@ impl BgToolApp {
         match restore_patch(&root) {
             Ok(css) => {
                 self.log_push(&format!("已从备份还原: {}", css.display()));
-                self.log_push("请重启 Kimi Code 生效");
+                let dist = root.join("resources").join("desktop-dist");
+                match write_hot_files(&dist, "") {
+                    Ok(_) => {
+                        if self.hot_enabled {
+                            self.log_push("热更新已推送：运行中的 Kimi Code 约 2 秒内自动生效，无需重启");
+                        } else {
+                            self.log_push("需重启 Kimi Code 生效（或点「安装热更新」，之后无需重启）");
+                        }
+                    }
+                    Err(e) => self.log_push(&format!("热更文件写入失败: {e:#}")),
+                }
             }
             Err(e) => self.log_push(&format!("还原失败: {e:#}")),
+        }
+        self.refresh();
+    }
+
+    fn do_install_hook(&mut self) {
+        let root = match self.root.clone() {
+            Some(r) => r,
+            None => {
+                self.log_push("错误: 安装路径无效，无法安装热更新");
+                return;
+            }
+        };
+        let dist = root.join("resources").join("desktop-dist");
+        let index = dist.join("index.html");
+        let result = (|| -> anyhow::Result<()> {
+            let content = fs::read_to_string(&index)
+                .with_context(|| format!("读取 {} 失败", index.display()))?;
+            let new_content = install_hook(&content)?;
+            if new_content != content {
+                let bak = backup_path(&index);
+                if !bak.exists() {
+                    fs::copy(&index, &bak)
+                        .with_context(|| format!("备份 index.html 失败: {}", bak.display()))?;
+                }
+                fs::write(&index, new_content)
+                    .with_context(|| format!("写入 index.html 失败: {}", index.display()))?;
+            }
+            // 放好初始热更文件，探针启动即有可拉取内容
+            write_hot_files(&dist, "")?;
+            Ok(())
+        })();
+        match result {
+            Ok(_) => self.log_push("热更新已安装，重启 Kimi Code 一次后永久生效，之后打补丁无需重启"),
+            Err(e) => self.log_push(&format!("安装热更新失败: {e:#}")),
+        }
+        self.refresh();
+    }
+
+    fn do_remove_hook(&mut self) {
+        let root = match self.root.clone() {
+            Some(r) => r,
+            None => {
+                self.log_push("错误: 安装路径无效，无法卸载热更新");
+                return;
+            }
+        };
+        let dist = root.join("resources").join("desktop-dist");
+        let index = dist.join("index.html");
+        let bak = backup_path(&index);
+        let result = if bak.exists() {
+            fs::copy(&bak, &index)
+                .with_context(|| format!("从备份恢复 index.html 失败: {}", index.display()))
+                .map(|_| ())
+        } else {
+            (|| -> anyhow::Result<()> {
+                let content = fs::read_to_string(&index)
+                    .with_context(|| format!("读取 {} 失败", index.display()))?;
+                fs::write(&index, remove_hook(&content))
+                    .with_context(|| format!("写入 index.html 失败: {}", index.display()))
+            })()
+        };
+        match result {
+            Ok(_) => self.log_push("热更新已卸载"),
+            Err(e) => self.log_push(&format!("卸载热更新失败: {e:#}")),
         }
         self.refresh();
     }
@@ -445,6 +581,80 @@ fn restore_patch(root: &Path) -> anyhow::Result<PathBuf> {
     Ok(css)
 }
 
+// ---------- 热更新 ----------
+
+fn hot_css_path(dist_root: &Path) -> PathBuf {
+    dist_root.join("kimi-wallpaper-hot.css")
+}
+
+fn hot_json_path(dist_root: &Path) -> PathBuf {
+    dist_root.join("kimi-wallpaper-hot.json")
+}
+
+/// 写热更 css（空字符串=无壁纸）和版本文件 {"v":N}。先写 css 后写 json（探针以 json 为准）。
+fn write_hot_files(dist_root: &Path, patch_css: &str) -> anyhow::Result<()> {
+    let re = regex::Regex::new(r#""v"\s*:\s*(\d+)"#)?;
+    let old_v: u64 = fs::read_to_string(hot_json_path(dist_root))
+        .ok()
+        .and_then(|s| {
+            re.captures(&s)?
+                .get(1)?
+                .as_str()
+                .parse::<u64>()
+                .ok()
+        })
+        .unwrap_or(0);
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let new_v = old_v.saturating_add(1).max(now_ms);
+    fs::write(hot_css_path(dist_root), patch_css).context("写入热更 css 失败")?;
+    fs::write(hot_json_path(dist_root), format!("{{\"v\":{new_v}}}"))
+        .context("写入热更版本文件失败")?;
+    Ok(())
+}
+
+fn hook_installed(index_html_content: &str) -> bool {
+    index_html_content.contains(HOT_HOOK_START)
+}
+
+/// 在最后一个 </body> 前插入热更新探针；已含标记时原样返回（幂等）。
+fn install_hook(index_html_content: &str) -> anyhow::Result<String> {
+    if hook_installed(index_html_content) {
+        return Ok(index_html_content.to_string());
+    }
+    let pos = index_html_content
+        .rfind("</body>")
+        .ok_or_else(|| anyhow!("index.html 中未找到 </body>，无法植入热更新探针"))?;
+    let mut out = String::with_capacity(index_html_content.len() + HOT_HOOK_BLOCK.len() + 1);
+    out.push_str(&index_html_content[..pos]);
+    out.push_str(HOT_HOOK_BLOCK);
+    out.push('\n');
+    out.push_str(&index_html_content[pos..]);
+    Ok(out)
+}
+
+/// 删除整段探针（含标记行），幂等。
+fn remove_hook(index_html_content: &str) -> String {
+    let Some(start) = index_html_content.find(HOT_HOOK_START) else {
+        return index_html_content.to_string();
+    };
+    let Some(rel) = index_html_content[start..].find(HOT_HOOK_END) else {
+        return index_html_content.to_string();
+    };
+    let end = start + rel + HOT_HOOK_END.len();
+    // 探针块首行自带缩进（插入时就在标记之前），连同其后插入的换行一起删除，
+    // 这样 remove(install(x)) == x 精确还原
+    let block_indent = HOT_HOOK_BLOCK.len() - HOT_HOOK_BLOCK.trim_start().len();
+    let removal_start = start.saturating_sub(block_indent);
+    let mut out = String::with_capacity(index_html_content.len());
+    out.push_str(&index_html_content[..removal_start]);
+    let rest = index_html_content[end..].strip_prefix('\n').unwrap_or(&index_html_content[end..]);
+    out.push_str(rest);
+    out
+}
+
 // ---------- 图片处理 ----------
 
 fn process_image(path: &Path) -> anyhow::Result<(String, usize, usize)> {
@@ -615,6 +825,11 @@ impl eframe::App for BgToolApp {
                 } else {
                     ui.colored_label(egui::Color32::DARK_GRAY, "无备份");
                 }
+                if self.hot_enabled {
+                    ui.colored_label(egui::Color32::from_rgb(120, 220, 120), "热更新: 已启用");
+                } else {
+                    ui.colored_label(egui::Color32::DARK_GRAY, "热更新: 未启用");
+                }
             });
 
             ui.separator();
@@ -649,6 +864,19 @@ impl eframe::App for BgToolApp {
                     .clicked()
                 {
                     self.do_restore();
+                }
+                if !self.hot_enabled {
+                    if ui
+                        .add(egui::Button::new("安装热更新").min_size(egui::vec2(100.0, 30.0)))
+                        .clicked()
+                    {
+                        self.do_install_hook();
+                    }
+                } else if ui
+                    .add(egui::Button::new("卸载热更新").min_size(egui::vec2(100.0, 30.0)))
+                    .clicked()
+                {
+                    self.do_remove_hook();
                 }
             });
 
@@ -816,6 +1044,8 @@ mod tests {
         assert!(css.contains("rgba(255,255,255,0.55)"));
         assert!(css.contains(".global-preview"), "浅色补丁应包含面板规则");
         assert!(css.contains("rgba(255,255,255,0.25)"), "浅色面板透明度 PA=0.25");
+        assert!(css.contains(".chat-header"), "补丁应包含顶部标签条半透明规则");
+        assert!(css.contains(".chat-dock:before"), "补丁应包含底部输入区遮帘规则");
     }
 
     #[test]
@@ -860,5 +1090,74 @@ mod tests {
     fn test_locate_main_css_from_index_html() {
         let (root, css_path) = make_fixture("locate");
         assert_eq!(locate_main_css(&root).unwrap(), css_path);
+    }
+
+    #[test]
+    fn test_install_hook_and_remove() {
+        let original = "<html>\n  <body>\n    <div>x</div>\n  </body>\n</html>\n";
+        let installed = install_hook(original).unwrap();
+        assert!(installed.contains(HOT_HOOK_START));
+        assert!(installed.contains(HOT_HOOK_END));
+        assert!(installed.contains("setInterval(tick, 2000)"));
+        assert_eq!(
+            installed.matches("kimi-wallpaper-hot-hook").count(),
+            2,
+            "起始/结束两个标记各出现一次"
+        );
+        assert!(hook_installed(&installed));
+
+        // 重复 install 幂等
+        let again = install_hook(&installed).unwrap();
+        assert_eq!(again, installed, "重复安装应原样返回");
+        assert_eq!(again.matches("kimi-wallpaper-hot-hook").count(), 2);
+
+        // remove 后与原文件一致，且幂等
+        let removed = remove_hook(&installed);
+        assert!(!removed.contains("kimi-wallpaper-hot-hook"));
+        assert_eq!(removed, original, "卸载探针后应恢复原内容");
+        assert_eq!(remove_hook(&removed), removed, "重复卸载不应改变内容");
+        assert!(!hook_installed(&removed));
+    }
+
+    #[test]
+    fn test_install_hook_no_body_errors() {
+        let r = install_hook("<html><head><title>t</title></head></html>");
+        assert!(r.is_err(), "找不到 </body> 时应报错");
+    }
+
+    #[test]
+    fn test_write_hot_files_bumps_version() {
+        let dist = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("test-fixture")
+            .join("hot-files");
+        let _ = fs::remove_dir_all(&dist);
+        fs::create_dir_all(&dist).unwrap();
+        let re = regex::Regex::new(r#""v"\s*:\s*(\d+)"#).unwrap();
+        let read_v = || -> u64 {
+            let j = fs::read_to_string(hot_json_path(&dist)).unwrap();
+            re.captures(&j).unwrap()[1].parse().unwrap()
+        };
+
+        // 首次写入：旧 v 视为 0，新 v = max(1, now_ms) = now_ms
+        write_hot_files(&dist, "cssA").unwrap();
+        assert_eq!(fs::read_to_string(hot_css_path(&dist)).unwrap(), "cssA");
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let v1 = read_v();
+        assert!(v1 >= now_ms - 5000, "首个版本应取当前 unix 毫秒（允许时钟误差）");
+        assert!(v1 >= 1);
+
+        // 手写旧大版本 -> 新 v = 旧v+1（旧v+1 > now_ms，取旧v+1 分支）
+        fs::write(hot_json_path(&dist), r#"{"v":99999999999999}"#).unwrap();
+        write_hot_files(&dist, "cssB").unwrap();
+        assert_eq!(fs::read_to_string(hot_css_path(&dist)).unwrap(), "cssB");
+        assert_eq!(read_v(), 100000000000000, "应取 旧v+1");
+
+        // 空 css 也写入，v 继续递增
+        write_hot_files(&dist, "").unwrap();
+        assert_eq!(fs::read_to_string(hot_css_path(&dist)).unwrap(), "");
+        assert_eq!(read_v(), 100000000000001, "空 css 后 v 应继续 +1");
     }
 }

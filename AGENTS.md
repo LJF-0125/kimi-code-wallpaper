@@ -21,7 +21,7 @@ cargo test --release     # 全部测试必须通过
 - 写入 `<安装根>\resources\desktop-dist\assets\main-*.css` 末尾，以 `/* === kimi-wallpaper-patch === */` 开头、`kimi-wallpaper-patch end === */` 结尾，`strip_patch` 靠这两个标记幂等移除
 - 首次写入前备份为 `主样式表名.wallpaper-bak`；「还原原版」只能从备份恢复，**永远不要无备份覆盖**
 - 主样式表文件名带 hash（如 `main-c0uVXxKo.css`），由 `locate_main_css` 从 index.html 里解析，**不要硬编码文件名**
-- 透明化名单（`.app/.con/body/#app` 全透明、`.side/.windows-titlebar` 侧边栏透明度、`.global-preview/.agent-panel/.file-preview/.fp-body/.ui-panel-header/.chat-header/.topbar` 面板透明度、`.chat-dock:before`）是反复用 CDP 探针排出来的，dark/light/system 三套镜像必须同步改
+- 透明化名单（`.app/.con/body/#app` 全透明、`.side/.windows-titlebar` 侧边栏透明度、`.global-preview/.agent-panel/.file-preview/.fp-body/.ui-panel-header/.chat-header/.topbar` 面板透明度、`.sc` 侧边聊天面板（/btw，aside.global-preview > .pt-shell > .pt-body 内的白底根容器，与面板组同款 {PA}）、`.chat-dock:before`）是反复用 CDP 探针排出来的，dark/light/system 三套镜像必须同步改
 
 ### 热更新
 - 探针块（`kimi-wallpaper-hot-hook`）插在 `index.html` 最后一个 `</body>` 前；index.html 也有 `.wallpaper-bak` 备份。当前为 **v3**（块内 `<!-- version: v3 -->` 标记，`HOOK_VERSION_MARK`）

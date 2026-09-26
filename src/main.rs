@@ -88,7 +88,7 @@ html[data-color-scheme=dark]{--kimi-wallpaper-mask:rgba(7,7,13,{DA})}
 html[data-color-scheme=dark]{background-color:#0a0a10;background-image:linear-gradient(rgba(7,7,13,{DA}),rgba(7,7,13,{DA})),var(--kimi-wallpaper-dark) !important;background-size:cover,cover;background-position:center,center;background-repeat:no-repeat,no-repeat;background-attachment:fixed,fixed}
 html[data-color-scheme=dark] .app,html[data-color-scheme=dark] .con,html[data-color-scheme=dark] body,html[data-color-scheme=dark] #app{background:transparent !important}
 html[data-color-scheme=dark] .side,html[data-color-scheme=dark] .windows-titlebar{background:rgba(10,10,17,{SA}) !important}
-html[data-color-scheme=dark] .global-preview,html[data-color-scheme=dark] .agent-panel,html[data-color-scheme=dark] .global-preview .file-preview,html[data-color-scheme=dark] .global-preview .fp-body,html[data-color-scheme=dark] .global-preview .ui-panel-header{background:rgba(10,10,17,{PA}) !important}
+html[data-color-scheme=dark] .sc,html[data-color-scheme=dark] .global-preview,html[data-color-scheme=dark] .agent-panel,html[data-color-scheme=dark] .global-preview .file-preview,html[data-color-scheme=dark] .global-preview .fp-body,html[data-color-scheme=dark] .global-preview .ui-panel-header{background:rgba(10,10,17,{PA}) !important}
 html[data-color-scheme=dark] .chat-header,html[data-color-scheme=dark] .topbar{background:rgba(10,10,17,{PA}) !important}
 html[data-color-scheme=dark] .chat-dock:before{opacity:.45 !important}
 @media (prefers-color-scheme:dark){
@@ -96,7 +96,7 @@ html[data-color-scheme=system]{--kimi-wallpaper-mask:rgba(7,7,13,{DA})}
 html[data-color-scheme=system]{background-color:#0a0a10;background-image:linear-gradient(rgba(7,7,13,{DA}),rgba(7,7,13,{DA})),var(--kimi-wallpaper-dark) !important;background-size:cover,cover;background-position:center,center;background-repeat:no-repeat,no-repeat;background-attachment:fixed,fixed}
 html[data-color-scheme=system] .app,html[data-color-scheme=system] .con,html[data-color-scheme=system] body,html[data-color-scheme=system] #app{background:transparent !important}
 html[data-color-scheme=system] .side,html[data-color-scheme=system] .windows-titlebar{background:rgba(10,10,17,{SA}) !important}
-html[data-color-scheme=system] .global-preview,html[data-color-scheme=system] .agent-panel,html[data-color-scheme=system] .global-preview .file-preview,html[data-color-scheme=system] .global-preview .fp-body,html[data-color-scheme=system] .global-preview .ui-panel-header{background:rgba(10,10,17,{PA}) !important}
+html[data-color-scheme=system] .sc,html[data-color-scheme=system] .global-preview,html[data-color-scheme=system] .agent-panel,html[data-color-scheme=system] .global-preview .file-preview,html[data-color-scheme=system] .global-preview .fp-body,html[data-color-scheme=system] .global-preview .ui-panel-header{background:rgba(10,10,17,{PA}) !important}
 html[data-color-scheme=system] .chat-header,html[data-color-scheme=system] .topbar{background:rgba(10,10,17,{PA}) !important}
 html[data-color-scheme=system] .chat-dock:before{opacity:.45 !important}
 }
@@ -107,7 +107,7 @@ html[data-color-scheme=light]{--kimi-wallpaper-mask:rgba(250,250,252,{LA})}
 html[data-color-scheme=light]{background-color:#f5f5f7;background-image:linear-gradient(rgba(250,250,252,{LA}),rgba(250,250,252,{LA})),var(--kimi-wallpaper-light) !important;background-size:cover,cover;background-position:center,center;background-repeat:no-repeat,no-repeat;background-attachment:fixed,fixed}
 html[data-color-scheme=light] .app,html[data-color-scheme=light] .con,html[data-color-scheme=light] body,html[data-color-scheme=light] #app{background:transparent !important}
 html[data-color-scheme=light] .side,html[data-color-scheme=light] .windows-titlebar{background:rgba(255,255,255,{SA}) !important}
-html[data-color-scheme=light] .global-preview,html[data-color-scheme=light] .agent-panel,html[data-color-scheme=light] .global-preview .file-preview,html[data-color-scheme=light] .global-preview .fp-body,html[data-color-scheme=light] .global-preview .ui-panel-header{background:rgba(255,255,255,{PA}) !important}
+html[data-color-scheme=light] .sc,html[data-color-scheme=light] .global-preview,html[data-color-scheme=light] .agent-panel,html[data-color-scheme=light] .global-preview .file-preview,html[data-color-scheme=light] .global-preview .fp-body,html[data-color-scheme=light] .global-preview .ui-panel-header{background:rgba(255,255,255,{PA}) !important}
 html[data-color-scheme=light] .chat-header,html[data-color-scheme=light] .topbar{background:rgba(255,255,255,{PA}) !important}
 html[data-color-scheme=light] .chat-dock:before{opacity:.45 !important}
 @media (prefers-color-scheme:light){
@@ -115,7 +115,7 @@ html[data-color-scheme=system]{--kimi-wallpaper-mask:rgba(250,250,252,{LA})}
 html[data-color-scheme=system]{background-color:#f5f5f7;background-image:linear-gradient(rgba(250,250,252,{LA}),rgba(250,250,252,{LA})),var(--kimi-wallpaper-light) !important;background-size:cover,cover;background-position:center,center;background-repeat:no-repeat,no-repeat;background-attachment:fixed,fixed}
 html[data-color-scheme=system] .app,html[data-color-scheme=system] .con,html[data-color-scheme=system] body,html[data-color-scheme=system] #app{background:transparent !important}
 html[data-color-scheme=system] .side,html[data-color-scheme=system] .windows-titlebar{background:rgba(255,255,255,{SA}) !important}
-html[data-color-scheme=system] .global-preview,html[data-color-scheme=system] .agent-panel,html[data-color-scheme=system] .global-preview .file-preview,html[data-color-scheme=system] .global-preview .fp-body,html[data-color-scheme=system] .global-preview .ui-panel-header{background:rgba(255,255,255,{PA}) !important}
+html[data-color-scheme=system] .sc,html[data-color-scheme=system] .global-preview,html[data-color-scheme=system] .agent-panel,html[data-color-scheme=system] .global-preview .file-preview,html[data-color-scheme=system] .global-preview .fp-body,html[data-color-scheme=system] .global-preview .ui-panel-header{background:rgba(255,255,255,{PA}) !important}
 html[data-color-scheme=system] .chat-header,html[data-color-scheme=system] .topbar{background:rgba(255,255,255,{PA}) !important}
 html[data-color-scheme=system] .chat-dock:before{opacity:.45 !important}
 }
@@ -126,28 +126,28 @@ html[data-color-scheme=system] .chat-dock:before{opacity:.45 !important}
 const VIDEO_TEMPLATE: &str = r#"html[data-color-scheme=dark]{--kimi-wallpaper-mask:rgba(7,7,13,{DA});background:transparent !important}
 html[data-color-scheme=dark] .app,html[data-color-scheme=dark] .con,html[data-color-scheme=dark] body,html[data-color-scheme=dark] #app{background:transparent !important}
 html[data-color-scheme=dark] .side,html[data-color-scheme=dark] .windows-titlebar{background:rgba(10,10,17,{SA}) !important}
-html[data-color-scheme=dark] .global-preview,html[data-color-scheme=dark] .agent-panel,html[data-color-scheme=dark] .global-preview .file-preview,html[data-color-scheme=dark] .fp-body,html[data-color-scheme=dark] .global-preview .ui-panel-header{background:rgba(10,10,17,{PA}) !important}
+html[data-color-scheme=dark] .sc,html[data-color-scheme=dark] .global-preview,html[data-color-scheme=dark] .agent-panel,html[data-color-scheme=dark] .global-preview .file-preview,html[data-color-scheme=dark] .fp-body,html[data-color-scheme=dark] .global-preview .ui-panel-header{background:rgba(10,10,17,{PA}) !important}
 html[data-color-scheme=dark] .chat-header,html[data-color-scheme=dark] .topbar{background:rgba(10,10,17,{PA}) !important}
 html[data-color-scheme=dark] .chat-dock:before{opacity:.45 !important}
 @media (prefers-color-scheme:dark){
 html[data-color-scheme=system]{--kimi-wallpaper-mask:rgba(7,7,13,{DA});background:transparent !important}
 html[data-color-scheme=system] .app,html[data-color-scheme=system] .con,html[data-color-scheme=system] body,html[data-color-scheme=system] #app{background:transparent !important}
 html[data-color-scheme=system] .side,html[data-color-scheme=system] .windows-titlebar{background:rgba(10,10,17,{SA}) !important}
-html[data-color-scheme=system] .global-preview,html[data-color-scheme=system] .agent-panel,html[data-color-scheme=system] .global-preview .file-preview,html[data-color-scheme=system] .fp-body,html[data-color-scheme=system] .global-preview .ui-panel-header{background:rgba(10,10,17,{PA}) !important}
+html[data-color-scheme=system] .sc,html[data-color-scheme=system] .global-preview,html[data-color-scheme=system] .agent-panel,html[data-color-scheme=system] .global-preview .file-preview,html[data-color-scheme=system] .fp-body,html[data-color-scheme=system] .global-preview .ui-panel-header{background:rgba(10,10,17,{PA}) !important}
 html[data-color-scheme=system] .chat-header,html[data-color-scheme=system] .topbar{background:rgba(10,10,17,{PA}) !important}
 html[data-color-scheme=system] .chat-dock:before{opacity:.45 !important}
 }
 html[data-color-scheme=light]{--kimi-wallpaper-mask:rgba(250,250,252,{LA});background:transparent !important}
 html[data-color-scheme=light] .app,html[data-color-scheme=light] .con,html[data-color-scheme=light] body,html[data-color-scheme=light] #app{background:transparent !important}
 html[data-color-scheme=light] .side,html[data-color-scheme=light] .windows-titlebar{background:rgba(255,255,255,{SA}) !important}
-html[data-color-scheme=light] .global-preview,html[data-color-scheme=light] .agent-panel,html[data-color-scheme=light] .global-preview .file-preview,html[data-color-scheme=light] .fp-body,html[data-color-scheme=light] .ui-panel-header{background:rgba(255,255,255,{PA}) !important}
+html[data-color-scheme=light] .sc,html[data-color-scheme=light] .global-preview,html[data-color-scheme=light] .agent-panel,html[data-color-scheme=light] .global-preview .file-preview,html[data-color-scheme=light] .fp-body,html[data-color-scheme=light] .ui-panel-header{background:rgba(255,255,255,{PA}) !important}
 html[data-color-scheme=light] .chat-header,html[data-color-scheme=light] .topbar{background:rgba(255,255,255,{PA}) !important}
 html[data-color-scheme=light] .chat-dock:before{opacity:.45 !important}
 @media (prefers-color-scheme:light){
 html[data-color-scheme=system]{--kimi-wallpaper-mask:rgba(250,250,252,{LA});background:transparent !important}
 html[data-color-scheme=system] .app,html[data-color-scheme=system] .con,html[data-color-scheme=system] body,html[data-color-scheme=system] #app{background:transparent !important}
 html[data-color-scheme=system] .side,html[data-color-scheme=system] .windows-titlebar{background:rgba(255,255,255,{SA}) !important}
-html[data-color-scheme=system] .global-preview,html[data-color-scheme=system] .agent-panel,html[data-color-scheme=system] .global-preview .file-preview,html[data-color-scheme=system] .fp-body,html[data-color-scheme=system] .ui-panel-header{background:rgba(255,255,255,{PA}) !important}
+html[data-color-scheme=system] .sc,html[data-color-scheme=system] .global-preview,html[data-color-scheme=system] .agent-panel,html[data-color-scheme=system] .global-preview .file-preview,html[data-color-scheme=system] .fp-body,html[data-color-scheme=system] .ui-panel-header{background:rgba(255,255,255,{PA}) !important}
 html[data-color-scheme=system] .chat-header,html[data-color-scheme=system] .topbar{background:rgba(255,255,255,{PA}) !important}
 html[data-color-scheme=system] .chat-dock:before{opacity:.45 !important}
 }
@@ -2557,6 +2557,7 @@ light.crop=,,
         assert!(patch.contains("html[data-color-scheme=system]{--kimi-wallpaper-mask:rgba(7,7,13,0.80)"));
         assert!(patch.contains("html[data-color-scheme=light]{--kimi-wallpaper-mask:rgba(250,250,252,0.78)"));
         assert!(patch.contains("html[data-color-scheme=system]{--kimi-wallpaper-mask:rgba(250,250,252,0.78)}"));
+        assert_eq!(patch.matches("] .sc,").count(), 4, "图片补丁 4 条面板规则同样应含 .sc（侧边聊天面板）");
     }
 
     #[test]
@@ -2575,6 +2576,10 @@ light.crop=,,
         assert!(patch.contains("rgba(255,255,255,0.25)"));
         assert!(!patch.contains("data:image"), "纯视频补丁不应内嵌图片");
         assert!(!patch.contains("{DA}") && !patch.contains("{LA}"), "占位符应全部替换");
+        // 侧边聊天面板（.sc，aside.global-preview > .pt-shell > .pt-body 内的白底根容器）
+        // 必须进面板组：与面板同款 {PA} 透明度，否则壁纸透不出
+        assert_eq!(patch.matches("] .sc,").count(), 4, "dark/light × scheme/system 共 4 条面板规则应含 .sc");
+        assert!(patch.contains("html[data-color-scheme=dark] .sc,html[data-color-scheme=dark] .global-preview"));
 
         // 应用到 fixture 再清空：应能精确还原（行为与图槽补丁一致）
         let (root, css_path) = make_fixture("video-only");

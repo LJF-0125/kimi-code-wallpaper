@@ -18,7 +18,9 @@ const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 const HOT_HOOK_START: &str = "<!-- === kimi-wallpaper-hot-hook === -->";
 const HOT_HOOK_END: &str = "<!-- === kimi-wallpaper-hot-hook end === -->";
 const HOOK_VERSION_MARK: &str = "<!-- version: v3 -->";
-const VIDEO_FILE_NAME: &str = "kimi-wallpaper-video.mp4";
+/// 视频文件名前缀：实际部署为版本化文件名 kimi-wallpaper-video-<毫秒时间戳>.mp4。
+/// 不用固定名是因为 Windows 不允许写入被播放实例占用的文件，换视频会部署失败。
+const VIDEO_FILE_PREFIX: &str = "kimi-wallpaper-video";
 const GIF_WARN_BYTES: usize = 3 * 512 * 1024; // 1.5MB
 
 const HOT_HOOK_BLOCK: &str = r#"    <!-- === kimi-wallpaper-hot-hook === -->
@@ -672,49 +674,35 @@ impl BgToolApp {
         }
     }
 
-    /// 部署视频：检测 moov 位置，非 faststart 自动重封装（不转码）后写入 dest；
-    /// 检测/重封装失败回退原样拷贝并日志提示。成功返回 Some(VIDEO_FILE_NAME)。
-    fn deploy_video(&mut self, src: &Path, dest: &Path) -> Option<String> {
-        let data = match fs::read(src) {
-            Ok(d) => d,
-            Err(e) => {
-                self.log_push(&format!("视频部署失败: 读取 {} 失败: {e}", src.display()));
-                return None;
-            }
-        };
-        let mut remuxed = false;
-        let out = match mp4_moov_before_mdat(&data) {
-            Ok(true) => data,
-            Ok(false) => match faststart_remux(&data) {
-                Ok(v) => {
-                    remuxed = true;
-                    v
+    /// 部署视频到版本化文件名（不覆盖正在播放的旧文件，Windows 下被占用会写失败）；
+    /// 写入失败时保留 json 当前指向的可用视频，确实没有才返回 None。成功返回 Some(新文件名)。
+    fn deploy_video(&mut self, src: &Path, dist: &Path) -> Option<String> {
+        match deploy_video_file(src, dist) {
+            Ok(d) => {
+                self.log_push(&format!("视频已部署: {:.1} MB", d.bytes as f64 / 1024.0 / 1024.0));
+                if d.remuxed {
+                    self.log_push("视频 moov 在文件尾，已自动重封装为 faststart（不转码，画质无损）");
                 }
-                Err(e) => {
-                    self.log_push(&format!(
-                        "faststart 重封装失败，已按原样部署；若背景卡住不动，请用 ffmpeg -movflags faststart 转一下: {e:#}"
-                    ));
-                    data
+                if d.fallback {
+                    self.log_push("faststart 检测/重封装失败，已按原样部署；若背景卡住不动，请用 ffmpeg -movflags faststart 转一下");
                 }
-            },
-            Err(e) => {
-                self.log_push(&format!(
-                    "faststart 检测失败，已按原样部署；若背景卡住不动，请用 ffmpeg -movflags faststart 转一下: {e:#}"
-                ));
-                data
+                self.log_push("警告: 视频背景持续解码播放，会增加耗电（笔记本用电池时更明显）");
+                if d.cleanup_blocked {
+                    self.log_push("旧视频文件暂被占用，下次应用时自动清理");
+                }
+                Some(d.name)
             }
-        };
-        let mb = out.len() as f64 / 1024.0 / 1024.0;
-        if let Err(e) = fs::write(dest, &out) {
-            self.log_push(&format!("视频部署失败: 写入 {} 失败: {e}", dest.display()));
-            return None;
+            Err(e) => {
+                self.log_push(&format!("视频部署失败: {e:#}"));
+                match current_video_from_json(dist) {
+                    Some(name) if dist.join(&name).is_file() => {
+                        self.log_push("新视频部署失败，保留当前视频");
+                        Some(name)
+                    }
+                    _ => None,
+                }
+            }
         }
-        self.log_push(&format!("视频已部署: {mb:.1} MB"));
-        if remuxed {
-            self.log_push("视频 moov 在文件尾，已自动重封装为 faststart（不转码，画质无损）");
-        }
-        self.log_push("警告: 视频背景持续解码播放，会增加耗电（笔记本用电池时更明显）");
-        Some(VIDEO_FILE_NAME.to_string())
     }
 
     fn do_apply(&mut self) {
@@ -746,19 +734,13 @@ impl BgToolApp {
         if let Some(p) = &light {
             self.log_processed("浅色图", p, self.light.crop.is_some());
         }
-        // 视频部署：app:// 协议不支持 Range 请求，MP4 必须 faststart（moov 在文件头），
-        // 非 faststart 自动重封装（纯搬盒子、不转码）后再写入 desktop-dist 固定名
+        // 视频部署：版本化文件名（kimi-wallpaper-video-<时间戳>.mp4），不覆盖正在播放的
+        // 旧文件（Windows 不允许写被占用文件）；moov 在尾的源自动重封装（不转码）
         let video_name = match self.video_path.clone() {
-            Some(src) => {
-                let dest = dist.join(VIDEO_FILE_NAME);
-                self.deploy_video(&src, &dest)
-            }
+            Some(src) => self.deploy_video(&src, &dist),
             None => {
-                let dest = dist.join(VIDEO_FILE_NAME);
-                if dest.exists() {
-                    if let Err(e) = fs::remove_file(&dest) {
-                        self.log_push(&format!("清理旧视频文件失败: {e:#}"));
-                    }
+                if cleanup_old_video_files(&dist, None) {
+                    self.log_push("旧视频文件暂被占用，下次应用时自动清理");
                 }
                 None
             }
@@ -1403,11 +1385,7 @@ fn write_hot_files(dist_root: &Path, patch_css: &str, video: Option<&str>) -> an
                 .ok()
         })
         .unwrap_or(0);
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-    let new_v = old_v.saturating_add(1).max(now_ms);
+    let new_v = old_v.saturating_add(1).max(unix_now_ms());
     let json = match video {
         Some(name) => format!("{{\"v\":{new_v},\"video\":\"{name}\"}}"),
         None => format!("{{\"v\":{new_v},\"video\":null}}"),
@@ -1657,6 +1635,89 @@ fn faststart_remux(data: &[u8]) -> anyhow::Result<Vec<u8>> {
         }
     }
     Ok(out)
+}
+
+/// 当前 unix 毫秒时间戳（与热更 json 版本号同源，用作视频文件名后缀）。
+fn unix_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// 读取热更 json 当前指向的视频文件名（video 为 null 或文件缺失时 None）。
+fn current_video_from_json(dist: &Path) -> Option<String> {
+    let json = fs::read_to_string(hot_json_path(dist)).ok()?;
+    let re = regex::Regex::new(r#""video"\s*:\s*"([^"]+)""#).ok()?;
+    Some(re.captures(&json)?.get(1)?.as_str().to_string())
+}
+
+/// 惰性清理 desktop-dist 下的版本化视频文件（kimi-wallpaper-video*.mp4，含历史固定名），
+/// 保留 keep 指定的文件。返回是否有文件因被占用而删除失败（调用方提示，下次应用再清）。
+fn cleanup_old_video_files(dist: &Path, keep: Option<&str>) -> bool {
+    let Ok(rd) = fs::read_dir(dist) else { return false };
+    let mut blocked = false;
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if !name.starts_with(VIDEO_FILE_PREFIX) || !name.ends_with(".mp4") {
+            continue;
+        }
+        if keep == Some(name.as_str()) {
+            continue;
+        }
+        if fs::remove_file(e.path()).is_err() {
+            blocked = true;
+        }
+    }
+    blocked
+}
+
+/// 视频部署结果。
+struct VideoDeploy {
+    name: String,
+    remuxed: bool,
+    fallback: bool,
+    cleanup_blocked: bool,
+    bytes: u64,
+}
+
+/// 部署视频字节到版本化文件名 kimi-wallpaper-video-<毫秒时间戳>.mp4（同毫秒冲突自增）：
+/// 不覆盖正在播放的旧文件，成功后惰性清理其余版本；faststart 检测/重封装失败时
+/// 回退原样字节（fallback=true）。写入失败返回 Err，由调用方决定保留现状。
+fn deploy_video_file(src: &Path, dist: &Path) -> anyhow::Result<VideoDeploy> {
+    let data = fs::read(src).with_context(|| format!("读取视频失败: {}", src.display()))?;
+    let mut remuxed = false;
+    let mut fallback = false;
+    let out = match mp4_moov_before_mdat(&data) {
+        Ok(true) => data,
+        Ok(false) => match faststart_remux(&data) {
+            Ok(v) => {
+                remuxed = true;
+                v
+            }
+            Err(_) => {
+                fallback = true;
+                data
+            }
+        },
+        Err(_) => {
+            fallback = true;
+            data
+        }
+    };
+    let mut stamp = unix_now_ms();
+    let mut dest = dist.join(format!("{VIDEO_FILE_PREFIX}-{stamp}.mp4"));
+    while dest.exists() {
+        stamp += 1;
+        dest = dist.join(format!("{VIDEO_FILE_PREFIX}-{stamp}.mp4"));
+    }
+    fs::write(&dest, &out).with_context(|| format!("写入 {} 失败", dest.display()))?;
+    let name = dest
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let cleanup_blocked = cleanup_old_video_files(dist, Some(&name));
+    Ok(VideoDeploy { name, remuxed, fallback, cleanup_blocked, bytes: out.len() as u64 })
 }
 
 // ---------- 图片处理 ----------
@@ -2533,11 +2594,12 @@ light.crop=,,
         let _ = fs::remove_dir_all(&dist);
         fs::create_dir_all(&dist).unwrap();
 
-        // 带视频字段
-        write_hot_files(&dist, "cssA", Some(VIDEO_FILE_NAME)).unwrap();
+        // 带视频字段（版本化文件名）
+        let vname = "kimi-wallpaper-video-1720000000000.mp4";
+        write_hot_files(&dist, "cssA", Some(vname)).unwrap();
         let j = fs::read_to_string(hot_json_path(&dist)).unwrap();
         assert!(j.starts_with('{') && j.ends_with('}'));
-        assert!(j.contains(&format!("\"video\":\"{VIDEO_FILE_NAME}\"")), "应写入 video 文件名: {j}");
+        assert!(j.contains(&format!("\"video\":\"{vname}\"")), "应写入 video 文件名: {j}");
 
         // 不带视频 -> null
         write_hot_files(&dist, "cssB", None).unwrap();
@@ -2734,5 +2796,84 @@ light.crop=,,
         );
         assert_eq!(read_mdat_payload(&out), mdat_payload.to_vec());
         assert_eq!(faststart_remux(&out).unwrap(), out, "重封装应幂等");
+    }
+
+    #[test]
+    fn test_deploy_video_versioned_and_cleanup() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("test-fixture").join("video-deploy");
+        let _ = fs::remove_dir_all(&dir);
+        let dist = dir.join("dist");
+        fs::create_dir_all(&dist).unwrap();
+        // 源视频：faststart 布局的玩具 mp4
+        let src = dir.join("src.mp4");
+        let mut good = bx(b"ftyp", b"isom0000");
+        good.extend_from_slice(&toy_moov(false, &[1000, 2000]));
+        good.extend_from_slice(&bx(b"mdat", &[0x11u8; 32]));
+        fs::write(&src, &good).unwrap();
+        // 预置陈旧版本 + 干扰文件
+        fs::write(dist.join("kimi-wallpaper-video-999.mp4"), b"stale").unwrap();
+        fs::write(dist.join("kimi-wallpaper-video.mp4"), b"legacy-fixed-name").unwrap();
+        fs::write(dist.join("kimi-wallpaper-hot.css"), b"css").unwrap();
+        fs::write(dist.join("other.mp4"), b"other").unwrap();
+
+        // 第一次部署：产生版本化文件，陈旧/历史固定名被惰性清理，干扰文件保留
+        let d1 = deploy_video_file(&src, &dist).unwrap();
+        assert!(d1.name.starts_with("kimi-wallpaper-video-") && d1.name.ends_with(".mp4"));
+        assert!(!d1.remuxed && !d1.fallback && !d1.cleanup_blocked);
+        assert!(dist.join(&d1.name).is_file());
+        assert!(!dist.join("kimi-wallpaper-video-999.mp4").exists(), "陈旧版本应被清理");
+        assert!(!dist.join("kimi-wallpaper-video.mp4").exists(), "历史固定名应被清理");
+        assert!(dist.join("kimi-wallpaper-hot.css").exists(), "非视频文件不应被动");
+        assert!(dist.join("other.mp4").exists(), "非 kimi 前缀的 mp4 不应被动");
+
+        // 第二次部署：产生不同版本名，上一个版本被清掉
+        let d2 = deploy_video_file(&src, &dist).unwrap();
+        assert_ne!(d1.name, d2.name, "两次部署应产生不同版本名");
+        assert!(!dist.join(&d1.name).exists(), "旧版本应被清理");
+        assert!(dist.join(&d2.name).is_file());
+    }
+
+    #[test]
+    fn test_deploy_video_remuxes_tail_moov() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("test-fixture").join("video-deploy-remux");
+        let _ = fs::remove_dir_all(&dir);
+        let dist = dir.join("dist");
+        fs::create_dir_all(&dist).unwrap();
+        // moov 在文件尾的源
+        let src = dir.join("src.mp4");
+        let mut bad = bx(b"ftyp", b"isom0000");
+        bad.extend_from_slice(&bx(b"mdat", &[0x22u8; 32]));
+        bad.extend_from_slice(&toy_moov(false, &[100, 200]));
+        fs::write(&src, &bad).unwrap();
+
+        let d = deploy_video_file(&src, &dist).unwrap();
+        assert!(d.remuxed, "moov 在尾的源应触发重封装");
+        assert!(!d.fallback);
+        let out = fs::read(dist.join(&d.name)).unwrap();
+        assert!(mp4_moov_before_mdat(&out).unwrap(), "部署结果应为 faststart");
+    }
+
+    #[test]
+    fn test_cleanup_all_and_current_video_from_json() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("test-fixture").join("video-clear");
+        let _ = fs::remove_dir_all(&dir);
+        let dist = dir.join("dist");
+        fs::create_dir_all(&dist).unwrap();
+        fs::write(dist.join("kimi-wallpaper-video-1.mp4"), b"a").unwrap();
+        fs::write(dist.join("kimi-wallpaper-video-2.mp4"), b"b").unwrap();
+        fs::write(dist.join("unrelated.mp4"), b"c").unwrap();
+
+        // 清除视频分支：删除全部版本化文件，非前缀文件保留
+        assert!(!cleanup_old_video_files(&dist, None));
+        assert!(!dist.join("kimi-wallpaper-video-1.mp4").exists());
+        assert!(!dist.join("kimi-wallpaper-video-2.mp4").exists());
+        assert!(dist.join("unrelated.mp4").exists());
+
+        // 当前视频名读取：有名字 / null / json 缺失
+        fs::write(hot_json_path(&dist), r#"{"v":1,"video":"kimi-wallpaper-video-1.mp4"}"#).unwrap();
+        assert_eq!(current_video_from_json(&dist).as_deref(), Some("kimi-wallpaper-video-1.mp4"));
+        fs::write(hot_json_path(&dist), r#"{"v":2,"video":null}"#).unwrap();
+        assert!(current_video_from_json(&dist).is_none());
+        assert!(current_video_from_json(&dir.join("no-such-dir")).is_none());
     }
 }

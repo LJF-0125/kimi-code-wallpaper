@@ -27,8 +27,8 @@ cargo test --release     # 全部测试必须通过
 - 探针块（`kimi-wallpaper-hot-hook`）插在 `index.html` 最后一个 `</body>` 前；index.html 也有 `.wallpaper-bak` 备份。当前为 **v3**（块内 `<!-- version: v3 -->` 标记，`HOOK_VERSION_MARK`）
 - v3 探针维护两层：`<video>` 背景层（z-index:-2，muted/loop/autoplay/playsInline，object-fit:cover）+ 独立遮罩 `<div>`（z-index:-1，`background:var(--kimi-wallpaper-mask,transparent)`，该 CSS 变量由补丁按 dark/light/system 定义，遮罩随主题自动切换，探针不感知主题）
 - **视频必须走 fetch→blob→objectURL**（v3 相对 v2 的唯一改动）：根因是 app:// 自定义协议对 `.mp4` 返回 **application/octet-stream**（app.asar 内 `protocol-*.cjs` 的 MIME 表无 .mp4 条目）且**无 Range/206 支持**（整文件流式返回），Chromium 媒体栈对直接 `video.src` 直接报 MEDIA_ERR_SRC_NOT_SUPPORTED（error 4，CDP 实测）；fetch 拿 blob 再 `URL.createObjectURL` 喂给 video 立刻正常播放（27MB 实测 readyState 4）。探针已改为 fetch→blob→objectURL 完全绕开协议层，切换视频时 revoke 旧 blobUrl
-- 热更文件：`kimi-wallpaper-hot.css`（=补丁全文）+ `kimi-wallpaper-hot.json`（`{"v":N,"video":"kimi-wallpaper-video.mp4"|null}`）。**必须先写 css 后写 json**，版本号 `max(旧+1, unix毫秒)`，探针以 json 为准；video 字段驱动视频层挂载/移除
-- 视频文件不内嵌：应用时拷贝到 `desktop-dist\kimi-wallpaper-video.mp4` 固定名，探针以 `/kimi-wallpaper-video.mp4` 绝对路径 fetch（app:// 同目录可读）
+- 热更文件：`kimi-wallpaper-hot.css`（=补丁全文）+ `kimi-wallpaper-hot.json`（`{"v":N,"video":"kimi-wallpaper-video-<时间戳>.mp4"|null}`）。**必须先写 css 后写 json**，版本号 `max(旧+1, unix毫秒)`，探针以 json 为准；video 字段驱动视频层挂载/移除
+- 视频文件不内嵌：应用时部署为**版本化文件名** `desktop-dist\kimi-wallpaper-video-<毫秒时间戳>.mp4`（不用固定名——Windows 不允许写入被播放实例占用的文件，直接覆盖会 OS error 32 部署失败），探针按 json 里的名字 fetch。部署成功后惰性清理其余 `kimi-wallpaper-video*.mp4`（含历史固定名），删除失败（旧文件仍被占用）忽略并提示「下次应用时自动清理」；清除视频时删全部版本化文件，json 照常写 null
 - faststart 重封装**保留**（`mp4_moov_before_mdat` 检测 + `faststart_remux` 纯搬盒子：moov 移到 mdat 前 + stco/co64 chunk 偏移修正）：当前 blob 路径下非必需，但有益无害，且对未来协议修复后可直放有意义
 - 探针 fetch **必须用绝对路径** `/kimi-wallpaper-hot.*`——相对路径在 `/sessions/<id>` 路由下会 404 静默失效（踩过的坑）
 - 升级检测：`hook_needs_upgrade` = 含起始标记但缺 `HOOK_VERSION_MARK`（v1/v2 等无当前标记的旧块）。`install_hook` 幂等策略：未安装→插入；旧块→remove 后再插当前块；已当前→原样返回。UI 三态：绿「已启用 v3」/ 黄「需升级」（按钮「升级热更新」）/ 灰「未启用」

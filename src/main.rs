@@ -17,18 +17,19 @@ const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 
 const HOT_HOOK_START: &str = "<!-- === kimi-wallpaper-hot-hook === -->";
 const HOT_HOOK_END: &str = "<!-- === kimi-wallpaper-hot-hook end === -->";
-const HOOK_VERSION_MARK: &str = "<!-- version: v2 -->";
+const HOOK_VERSION_MARK: &str = "<!-- version: v3 -->";
 const VIDEO_FILE_NAME: &str = "kimi-wallpaper-video.mp4";
 const GIF_WARN_BYTES: usize = 3 * 512 * 1024; // 1.5MB
 
 const HOT_HOOK_BLOCK: &str = r#"    <!-- === kimi-wallpaper-hot-hook === -->
-    <!-- version: v2 -->
+    <!-- version: v3 -->
     <script>
       (function () {
         var STYLE_ID = 'kimi-wallpaper-hot-style';
         var VIDEO_ID = 'kimi-wallpaper-hot-video';
         var MASK_ID = 'kimi-wallpaper-hot-mask';
         var cur = null, curVideo;
+        var blobUrl = null;
         function applyCss(css) {
           var el = document.getElementById(STYLE_ID);
           if (!el) { el = document.createElement('style'); el.id = STYLE_ID; document.head.appendChild(el); }
@@ -37,14 +38,29 @@ const HOT_HOOK_BLOCK: &str = r#"    <!-- === kimi-wallpaper-hot-hook === -->
         function applyVideo(name) {
           if (name === curVideo) return; curVideo = name;
           var v = document.getElementById(VIDEO_ID), m = document.getElementById(MASK_ID);
-          if (!name) { if (v) v.remove(); if (m) m.remove(); return; }
+          if (!name) {
+            if (v) v.remove(); if (m) m.remove();
+            if (blobUrl) { URL.revokeObjectURL(blobUrl); blobUrl = null; }
+            return;
+          }
           if (!v) { v = document.createElement('video'); v.id = VIDEO_ID; document.body.appendChild(v); }
           v.muted = true; v.loop = true; v.autoplay = true; v.playsInline = true;
           v.setAttribute('style', 'position:fixed;left:0;top:0;width:100%;height:100%;object-fit:cover;z-index:-2;pointer-events:none');
-          v.src = '/' + name + '?v=' + Date.now();
-          v.play().catch(function () {});
           if (!m) { m = document.createElement('div'); m.id = MASK_ID; document.body.appendChild(m); }
           m.setAttribute('style', 'position:fixed;left:0;top:0;width:100%;height:100%;z-index:-1;pointer-events:none;background:var(--kimi-wallpaper-mask,transparent)');
+          // app:// protocol serves mp4 as application/octet-stream without Range support;
+          // the media stack rejects direct src (MEDIA_ERR_SRC_NOT_SUPPORTED).
+          // fetch->blob->objectURL bypasses the protocol layer entirely.
+          fetch('/' + name + '?v=' + Date.now(), { cache: 'no-store' })
+            .then(function (r) { if (!r.ok) throw 0; return r.blob(); })
+            .then(function (b) {
+              if (name !== curVideo) return;
+              if (blobUrl) URL.revokeObjectURL(blobUrl);
+              blobUrl = URL.createObjectURL(b);
+              v.src = blobUrl;
+              v.play().catch(function () {});
+            })
+            .catch(function () {});
         }
         function tick() {
           fetch('/kimi-wallpaper-hot.json?_=' + Date.now(), { cache: 'no-store' })
@@ -98,6 +114,38 @@ html[data-color-scheme=system]{background-color:#f5f5f7;background-image:linear-
 html[data-color-scheme=system] .app,html[data-color-scheme=system] .con,html[data-color-scheme=system] body,html[data-color-scheme=system] #app{background:transparent !important}
 html[data-color-scheme=system] .side,html[data-color-scheme=system] .windows-titlebar{background:rgba(255,255,255,{SA}) !important}
 html[data-color-scheme=system] .global-preview,html[data-color-scheme=system] .agent-panel,html[data-color-scheme=system] .global-preview .file-preview,html[data-color-scheme=system] .global-preview .fp-body,html[data-color-scheme=system] .global-preview .ui-panel-header{background:rgba(255,255,255,{PA}) !important}
+html[data-color-scheme=system] .chat-header,html[data-color-scheme=system] .topbar{background:rgba(255,255,255,{PA}) !important}
+html[data-color-scheme=system] .chat-dock:before{opacity:.45 !important}
+}
+"#;
+
+/// 仅视频背景（图片槽全空）时的补丁：无图片背景，但保留透明化规则与遮罩变量，
+/// 否则 html 恢复不透明背景，白底会盖住 z-index:-2 的视频层。
+const VIDEO_TEMPLATE: &str = r#"html[data-color-scheme=dark]{--kimi-wallpaper-mask:rgba(7,7,13,{DA});background:transparent !important}
+html[data-color-scheme=dark] .app,html[data-color-scheme=dark] .con,html[data-color-scheme=dark] body,html[data-color-scheme=dark] #app{background:transparent !important}
+html[data-color-scheme=dark] .side,html[data-color-scheme=dark] .windows-titlebar{background:rgba(10,10,17,{SA}) !important}
+html[data-color-scheme=dark] .global-preview,html[data-color-scheme=dark] .agent-panel,html[data-color-scheme=dark] .global-preview .file-preview,html[data-color-scheme=dark] .fp-body,html[data-color-scheme=dark] .global-preview .ui-panel-header{background:rgba(10,10,17,{PA}) !important}
+html[data-color-scheme=dark] .chat-header,html[data-color-scheme=dark] .topbar{background:rgba(10,10,17,{PA}) !important}
+html[data-color-scheme=dark] .chat-dock:before{opacity:.45 !important}
+@media (prefers-color-scheme:dark){
+html[data-color-scheme=system]{--kimi-wallpaper-mask:rgba(7,7,13,{DA});background:transparent !important}
+html[data-color-scheme=system] .app,html[data-color-scheme=system] .con,html[data-color-scheme=system] body,html[data-color-scheme=system] #app{background:transparent !important}
+html[data-color-scheme=system] .side,html[data-color-scheme=system] .windows-titlebar{background:rgba(10,10,17,{SA}) !important}
+html[data-color-scheme=system] .global-preview,html[data-color-scheme=system] .agent-panel,html[data-color-scheme=system] .global-preview .file-preview,html[data-color-scheme=system] .fp-body,html[data-color-scheme=system] .global-preview .ui-panel-header{background:rgba(10,10,17,{PA}) !important}
+html[data-color-scheme=system] .chat-header,html[data-color-scheme=system] .topbar{background:rgba(10,10,17,{PA}) !important}
+html[data-color-scheme=system] .chat-dock:before{opacity:.45 !important}
+}
+html[data-color-scheme=light]{--kimi-wallpaper-mask:rgba(250,250,252,{LA});background:transparent !important}
+html[data-color-scheme=light] .app,html[data-color-scheme=light] .con,html[data-color-scheme=light] body,html[data-color-scheme=light] #app{background:transparent !important}
+html[data-color-scheme=light] .side,html[data-color-scheme=light] .windows-titlebar{background:rgba(255,255,255,{SA}) !important}
+html[data-color-scheme=light] .global-preview,html[data-color-scheme=light] .agent-panel,html[data-color-scheme=light] .global-preview .file-preview,html[data-color-scheme=light] .fp-body,html[data-color-scheme=light] .ui-panel-header{background:rgba(255,255,255,{PA}) !important}
+html[data-color-scheme=light] .chat-header,html[data-color-scheme=light] .topbar{background:rgba(255,255,255,{PA}) !important}
+html[data-color-scheme=light] .chat-dock:before{opacity:.45 !important}
+@media (prefers-color-scheme:light){
+html[data-color-scheme=system]{--kimi-wallpaper-mask:rgba(250,250,252,{LA});background:transparent !important}
+html[data-color-scheme=system] .app,html[data-color-scheme=system] .con,html[data-color-scheme=system] body,html[data-color-scheme=system] #app{background:transparent !important}
+html[data-color-scheme=system] .side,html[data-color-scheme=system] .windows-titlebar{background:rgba(255,255,255,{SA}) !important}
+html[data-color-scheme=system] .global-preview,html[data-color-scheme=system] .agent-panel,html[data-color-scheme=system] .global-preview .file-preview,html[data-color-scheme=system] .fp-body,html[data-color-scheme=system] .ui-panel-header{background:rgba(255,255,255,{PA}) !important}
 html[data-color-scheme=system] .chat-header,html[data-color-scheme=system] .topbar{background:rgba(255,255,255,{PA}) !important}
 html[data-color-scheme=system] .chat-dock:before{opacity:.45 !important}
 }
@@ -715,12 +763,22 @@ impl BgToolApp {
                 None
             }
         };
-        let patch = build_patch(
+        let patch = match build_patch(
             dark.as_ref().map(|t| (t.b64.as_str(), self.dark.alpha, t.mime)),
             light.as_ref().map(|t| (t.b64.as_str(), self.light.alpha, t.mime)),
             self.side_alpha,
             self.panel_alpha,
-        );
+        ) {
+            // 视频激活但图片槽全空：仍要下发透明化+遮罩变量补丁（无图版），
+            // 否则补丁被清空后界面恢复不透明背景，白底盖住视频层
+            None if video_name.is_some() => Some(build_video_patch(
+                self.dark.alpha,
+                self.light.alpha,
+                self.side_alpha,
+                self.panel_alpha,
+            )),
+            other => other,
+        };
         match apply_patch(&root, patch.as_deref()) {
             Ok(css) => {
                 if patch.is_some() {
@@ -805,7 +863,7 @@ impl BgToolApp {
         })();
         match result {
             Ok(_) if upgrading => {
-                self.log_push("热更新已升级到 v2（支持视频背景），重启 Kimi Code 一次后生效")
+                self.log_push("热更新已升级到 v3（视频走 blob 绕过 app:// 协议缺陷），重启 Kimi Code 一次后生效")
             }
             Ok(_) => self.log_push("热更新已安装，重启 Kimi Code 一次后永久生效，之后打补丁无需重启"),
             Err(e) => self.log_push(&format!("安装热更新失败: {e:#}")),
@@ -1266,6 +1324,22 @@ fn build_patch(
     }
     out.push_str("/* === kimi-wallpaper-patch end === */\n");
     Some(out)
+}
+
+/// 仅视频背景（图片槽全空）时的补丁：透明化规则 + 遮罩变量，无图片背景。
+/// 否则界面恢复不透明底，盖住 z-index:-2 的视频层（白屏）。
+fn build_video_patch(dark_alpha: f32, light_alpha: f32, side_alpha: f32, panel_alpha: f32) -> String {
+    let mut out = String::from(PATCH_HEADER);
+    out.push('\n');
+    out.push_str(
+        &VIDEO_TEMPLATE
+            .replace("{DA}", &format!("{dark_alpha:.2}"))
+            .replace("{LA}", &format!("{light_alpha:.2}"))
+            .replace("{SA}", &format!("{side_alpha:.2}"))
+            .replace("{PA}", &format!("{panel_alpha:.2}")),
+    );
+    out.push_str("/* === kimi-wallpaper-patch end === */\n");
+    out
 }
 
 /// patch 为 None 时只移除现有补丁（纯还原）。
@@ -1816,7 +1890,7 @@ impl eframe::App for BgToolApp {
                     if self.hot_needs_upgrade {
                         ui.colored_label(egui::Color32::from_rgb(230, 200, 90), "热更新: 需升级");
                     } else {
-                        ui.colored_label(egui::Color32::from_rgb(120, 220, 120), "热更新: 已启用 v2");
+                        ui.colored_label(egui::Color32::from_rgb(120, 220, 120), "热更新: 已启用 v3");
                     }
                 } else {
                     ui.colored_label(egui::Color32::DARK_GRAY, "热更新: 未启用");
@@ -2152,7 +2226,7 @@ mod tests {
         let installed = install_hook(original).unwrap();
         assert!(installed.contains(HOT_HOOK_START));
         assert!(installed.contains(HOT_HOOK_END));
-        assert!(installed.contains(HOOK_VERSION_MARK), "新装探针应为 v2");
+        assert!(installed.contains(HOOK_VERSION_MARK), "新装探针应带当前版本标记");
         assert!(installed.contains("setInterval(tick, 2000)"));
         assert!(
             installed.contains("fetch('/kimi-wallpaper-hot.json"),
@@ -2425,6 +2499,33 @@ light.crop=,,
     }
 
     #[test]
+    fn test_build_video_patch() {
+        let patch = build_video_patch(0.80, 0.78, 0.55, 0.25);
+        assert!(patch.starts_with(PATCH_HEADER), "应含补丁头");
+        assert!(patch.contains("/* === kimi-wallpaper-patch end === */"));
+        // 透明化规则 + 遮罩变量齐全（dark/light × scheme/system 共 4 条），且无图片背景
+        assert_eq!(patch.matches("--kimi-wallpaper-mask").count(), 4);
+        assert!(patch.contains("background:transparent !important"), "html 背景必须透明，否则盖住视频层");
+        assert!(patch.contains("rgba(7,7,13,0.80)"));
+        assert!(patch.contains("rgba(250,250,252,0.78)"));
+        assert!(patch.contains("rgba(10,10,17,0.55)"));
+        assert!(patch.contains("rgba(255,255,255,0.55)"));
+        assert!(patch.contains("rgba(10,10,17,0.25)"));
+        assert!(patch.contains("rgba(255,255,255,0.25)"));
+        assert!(!patch.contains("data:image"), "纯视频补丁不应内嵌图片");
+        assert!(!patch.contains("{DA}") && !patch.contains("{LA}"), "占位符应全部替换");
+
+        // 应用到 fixture 再清空：应能精确还原（行为与图槽补丁一致）
+        let (root, css_path) = make_fixture("video-only");
+        apply_patch(&root, Some(&patch)).unwrap();
+        let css = fs::read_to_string(&css_path).unwrap();
+        assert!(css.contains("--kimi-wallpaper-mask"));
+        assert_eq!(css.matches(PATCH_HEADER).count(), 1);
+        apply_patch(&root, None).unwrap();
+        assert_eq!(fs::read_to_string(&css_path).unwrap(), ORIG_CSS, "移除补丁后应还原原版");
+    }
+
+    #[test]
     fn test_write_hot_files_video_field() {
         let dist = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("test-fixture")
@@ -2455,21 +2556,21 @@ light.crop=,,
     }
 
     #[test]
-    fn test_install_hook_v2_upgrade() {
-        // 手工拼一个 v1 块（= v2 块去掉版本注释行）
+    fn test_install_hook_upgrade() {
+        // 手工拼一个旧版块（= 当前块去掉版本注释行，模拟无标记的历史版本）
         let v1_block = HOT_HOOK_BLOCK
-            .replace("    <!-- version: v2 -->\n", "")
+            .replace(&format!("    {HOOK_VERSION_MARK}\n"), "")
             .to_string();
         assert!(!v1_block.contains(HOOK_VERSION_MARK));
         let original = "<html><body>\n</body></html>";
         let with_v1 = format!("<html><body>\n{v1_block}\n</body></html>");
 
         assert!(hook_installed(&with_v1));
-        assert!(hook_needs_upgrade(&with_v1), "v1 块应被判定需升级");
+        assert!(hook_needs_upgrade(&with_v1), "无版本标记的旧块应被判定需升级");
 
-        // 升级：v1 -> v2，只保留一段探针
+        // 升级：旧块 -> 当前版本，只保留一段探针
         let upgraded = install_hook(&with_v1).unwrap();
-        assert!(upgraded.contains(HOOK_VERSION_MARK), "升级后应为 v2");
+        assert!(upgraded.contains(HOOK_VERSION_MARK), "升级后应带当前版本标记");
         assert!(!hook_needs_upgrade(&upgraded));
         assert_eq!(upgraded.matches(HOT_HOOK_START).count(), 1, "升级后只应有一段探针块");
         assert_eq!(upgraded.matches("kimi-wallpaper-hot-hook").count(), 2);

@@ -24,13 +24,15 @@ cargo test --release     # 全部测试必须通过
 - 透明化名单（`.app/.con/body/#app` 全透明、`.side/.windows-titlebar` 侧边栏透明度、`.global-preview/.agent-panel/.file-preview/.fp-body/.ui-panel-header/.chat-header/.topbar` 面板透明度、`.chat-dock:before`）是反复用 CDP 探针排出来的，dark/light/system 三套镜像必须同步改
 
 ### 热更新
-- 探针块（`kimi-wallpaper-hot-hook`）插在 `index.html` 最后一个 `</body>` 前；index.html 也有 `.wallpaper-bak` 备份。当前为 **v2**（块内 `<!-- version: v2 -->` 标记，`HOOK_VERSION_MARK`）
-- v2 探针维护两层：`<video>` 背景层（z-index:-2，muted/loop/autoplay/playsInline，object-fit:cover）+ 独立遮罩 `<div>`（z-index:-1，`background:var(--kimi-wallpaper-mask,transparent)`，该 CSS 变量由补丁按 dark/light/system 定义，遮罩随主题自动切换，探针不感知主题）
+- 探针块（`kimi-wallpaper-hot-hook`）插在 `index.html` 最后一个 `</body>` 前；index.html 也有 `.wallpaper-bak` 备份。当前为 **v3**（块内 `<!-- version: v3 -->` 标记，`HOOK_VERSION_MARK`）
+- v3 探针维护两层：`<video>` 背景层（z-index:-2，muted/loop/autoplay/playsInline，object-fit:cover）+ 独立遮罩 `<div>`（z-index:-1，`background:var(--kimi-wallpaper-mask,transparent)`，该 CSS 变量由补丁按 dark/light/system 定义，遮罩随主题自动切换，探针不感知主题）
+- **视频必须走 fetch→blob→objectURL**（v3 相对 v2 的唯一改动）：根因是 app:// 自定义协议对 `.mp4` 返回 **application/octet-stream**（app.asar 内 `protocol-*.cjs` 的 MIME 表无 .mp4 条目）且**无 Range/206 支持**（整文件流式返回），Chromium 媒体栈对直接 `video.src` 直接报 MEDIA_ERR_SRC_NOT_SUPPORTED（error 4，CDP 实测）；fetch 拿 blob 再 `URL.createObjectURL` 喂给 video 立刻正常播放（27MB 实测 readyState 4）。探针已改为 fetch→blob→objectURL 完全绕开协议层，切换视频时 revoke 旧 blobUrl
 - 热更文件：`kimi-wallpaper-hot.css`（=补丁全文）+ `kimi-wallpaper-hot.json`（`{"v":N,"video":"kimi-wallpaper-video.mp4"|null}`）。**必须先写 css 后写 json**，版本号 `max(旧+1, unix毫秒)`，探针以 json 为准；video 字段驱动视频层挂载/移除
-- 视频文件不内嵌：应用时拷贝到 `desktop-dist\kimi-wallpaper-video.mp4` 固定名，探针以 `/kimi-wallpaper-video.mp4` 绝对路径引用（app:// 同目录可读）
-- **app:// 协议处理器不支持 Range 请求**（已解包主进程 `protocol-*.cjs` 源码确认：整文件流式返回、无 206/Content-Range），MP4 必须 faststart（moov 在文件头），否则视频卡死在第一帧。工具部署时自动检测（`mp4_moov_before_mdat`），非 faststart 自动重封装（`faststart_remux`，纯搬盒子不转码：moov 移到 mdat 前 + stco/co64 chunk 偏移按 mdat 位移修正），检测/重封装失败回退原样拷贝并提示 `ffmpeg -movflags faststart`
+- 视频文件不内嵌：应用时拷贝到 `desktop-dist\kimi-wallpaper-video.mp4` 固定名，探针以 `/kimi-wallpaper-video.mp4` 绝对路径 fetch（app:// 同目录可读）
+- faststart 重封装**保留**（`mp4_moov_before_mdat` 检测 + `faststart_remux` 纯搬盒子：moov 移到 mdat 前 + stco/co64 chunk 偏移修正）：当前 blob 路径下非必需，但有益无害，且对未来协议修复后可直放有意义
 - 探针 fetch **必须用绝对路径** `/kimi-wallpaper-hot.*`——相对路径在 `/sessions/<id>` 路由下会 404 静默失效（踩过的坑）
-- 升级检测：`hook_needs_upgrade` = 含起始标记但缺 `HOOK_VERSION_MARK`（v1 旧块）。`install_hook` 幂等策略：未安装→插入；v1→remove 旧块再插 v2；已 v2→原样返回。UI 三态：v2 绿「已启用 v2」/ v1 黄「需升级」（按钮「升级热更新」）/ 未装「未启用」
+- 升级检测：`hook_needs_upgrade` = 含起始标记但缺 `HOOK_VERSION_MARK`（v1/v2 等无当前标记的旧块）。`install_hook` 幂等策略：未安装→插入；旧块→remove 后再插当前块；已当前→原样返回。UI 三态：绿「已启用 v3」/ 黄「需升级」（按钮「升级热更新」）/ 灰「未启用」
+- **纯视频白屏修复**：图片槽全空但视频激活时，`build_patch` 返回 None 会把热更 CSS 清空 → 界面恢复不透明背景盖住视频层（白屏）。`do_apply` 在该分支改发 `build_video_patch`（`VIDEO_TEMPLATE`：透明化规则 + `--kimi-wallpaper-mask` 变量 + html `background:transparent`，无图片）；无任何配置（无图无视频）时仍返回 None 走纯还原，行为不变
 - Kimi Code 应用更新会冲掉 index.html（探针）和 main-*.css（补丁），热更文件可能幸存但成孤儿。更新后的恢复流程见 `T:\KCD BackGrond\热更新探针-档案与恢复指南.md`
 
 ### 图片管线

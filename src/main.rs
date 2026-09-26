@@ -50,14 +50,14 @@ const HOT_HOOK_BLOCK: &str = r#"    <!-- === kimi-wallpaper-hot-hook === -->
     <!-- === kimi-wallpaper-hot-hook end === -->"#;
 
 const DARK_TEMPLATE: &str = r#":root{--kimi-wallpaper-dark:url("data:image/jpeg;base64,{B64}")}
-html[data-color-scheme=dark]{background-color:#0a0a10;background-image:linear-gradient(rgba(7,7,13,{DA}),rgba(7,7,13,{DA})),var(--kimi-wallpaper-dark) !important;background-size:cover,{BS};background-position:center,{BP};background-repeat:no-repeat,no-repeat;background-attachment:fixed,fixed}
+html[data-color-scheme=dark]{background-color:#0a0a10;background-image:linear-gradient(rgba(7,7,13,{DA}),rgba(7,7,13,{DA})),var(--kimi-wallpaper-dark) !important;background-size:cover,cover;background-position:center,center;background-repeat:no-repeat,no-repeat;background-attachment:fixed,fixed}
 html[data-color-scheme=dark] .app,html[data-color-scheme=dark] .con,html[data-color-scheme=dark] body,html[data-color-scheme=dark] #app{background:transparent !important}
 html[data-color-scheme=dark] .side,html[data-color-scheme=dark] .windows-titlebar{background:rgba(10,10,17,{SA}) !important}
 html[data-color-scheme=dark] .global-preview,html[data-color-scheme=dark] .agent-panel,html[data-color-scheme=dark] .global-preview .file-preview,html[data-color-scheme=dark] .global-preview .fp-body,html[data-color-scheme=dark] .global-preview .ui-panel-header{background:rgba(10,10,17,{PA}) !important}
 html[data-color-scheme=dark] .chat-header,html[data-color-scheme=dark] .topbar{background:rgba(10,10,17,{PA}) !important}
 html[data-color-scheme=dark] .chat-dock:before{opacity:.45 !important}
 @media (prefers-color-scheme:dark){
-html[data-color-scheme=system]{background-color:#0a0a10;background-image:linear-gradient(rgba(7,7,13,{DA}),rgba(7,7,13,{DA})),var(--kimi-wallpaper-dark) !important;background-size:cover,{BS};background-position:center,{BP};background-repeat:no-repeat,no-repeat;background-attachment:fixed,fixed}
+html[data-color-scheme=system]{background-color:#0a0a10;background-image:linear-gradient(rgba(7,7,13,{DA}),rgba(7,7,13,{DA})),var(--kimi-wallpaper-dark) !important;background-size:cover,cover;background-position:center,center;background-repeat:no-repeat,no-repeat;background-attachment:fixed,fixed}
 html[data-color-scheme=system] .app,html[data-color-scheme=system] .con,html[data-color-scheme=system] body,html[data-color-scheme=system] #app{background:transparent !important}
 html[data-color-scheme=system] .side,html[data-color-scheme=system] .windows-titlebar{background:rgba(10,10,17,{SA}) !important}
 html[data-color-scheme=system] .global-preview,html[data-color-scheme=system] .agent-panel,html[data-color-scheme=system] .global-preview .file-preview,html[data-color-scheme=system] .global-preview .fp-body,html[data-color-scheme=system] .global-preview .ui-panel-header{background:rgba(10,10,17,{PA}) !important}
@@ -67,14 +67,14 @@ html[data-color-scheme=system] .chat-dock:before{opacity:.45 !important}
 "#;
 
 const LIGHT_TEMPLATE: &str = r#":root{--kimi-wallpaper-light:url("data:image/jpeg;base64,{B64}")}
-html[data-color-scheme=light]{background-color:#f5f5f7;background-image:linear-gradient(rgba(250,250,252,{LA}),rgba(250,250,252,{LA})),var(--kimi-wallpaper-light) !important;background-size:cover,{BS};background-position:center,{BP};background-repeat:no-repeat,no-repeat;background-attachment:fixed,fixed}
+html[data-color-scheme=light]{background-color:#f5f5f7;background-image:linear-gradient(rgba(250,250,252,{LA}),rgba(250,250,252,{LA})),var(--kimi-wallpaper-light) !important;background-size:cover,cover;background-position:center,center;background-repeat:no-repeat,no-repeat;background-attachment:fixed,fixed}
 html[data-color-scheme=light] .app,html[data-color-scheme=light] .con,html[data-color-scheme=light] body,html[data-color-scheme=light] #app{background:transparent !important}
 html[data-color-scheme=light] .side,html[data-color-scheme=light] .windows-titlebar{background:rgba(255,255,255,{SA}) !important}
 html[data-color-scheme=light] .global-preview,html[data-color-scheme=light] .agent-panel,html[data-color-scheme=light] .global-preview .file-preview,html[data-color-scheme=light] .global-preview .fp-body,html[data-color-scheme=light] .global-preview .ui-panel-header{background:rgba(255,255,255,{PA}) !important}
 html[data-color-scheme=light] .chat-header,html[data-color-scheme=light] .topbar{background:rgba(255,255,255,{PA}) !important}
 html[data-color-scheme=light] .chat-dock:before{opacity:.45 !important}
 @media (prefers-color-scheme:light){
-html[data-color-scheme=system]{background-color:#f5f5f7;background-image:linear-gradient(rgba(250,250,252,{LA}),rgba(250,250,252,{LA})),var(--kimi-wallpaper-light) !important;background-size:cover,{BS};background-position:center,{BP};background-repeat:no-repeat,no-repeat;background-attachment:fixed,fixed}
+html[data-color-scheme=system]{background-color:#f5f5f7;background-image:linear-gradient(rgba(250,250,252,{LA}),rgba(250,250,252,{LA})),var(--kimi-wallpaper-light) !important;background-size:cover,cover;background-position:center,center;background-repeat:no-repeat,no-repeat;background-attachment:fixed,fixed}
 html[data-color-scheme=system] .app,html[data-color-scheme=system] .con,html[data-color-scheme=system] body,html[data-color-scheme=system] #app{background:transparent !important}
 html[data-color-scheme=system] .side,html[data-color-scheme=system] .windows-titlebar{background:rgba(255,255,255,{SA}) !important}
 html[data-color-scheme=system] .global-preview,html[data-color-scheme=system] .agent-panel,html[data-color-scheme=system] .global-preview .file-preview,html[data-color-scheme=system] .global-preview .fp-body,html[data-color-scheme=system] .global-preview .ui-panel-header{background:rgba(255,255,255,{PA}) !important}
@@ -242,7 +242,6 @@ struct BgToolApp {
     light: Slot,
     side_alpha: f32,
     panel_alpha: f32,
-    fit_mode: FitMode,
     log: String,
     crop_editor: Option<CropEditor>,
 }
@@ -261,7 +260,6 @@ impl BgToolApp {
             light: Slot::new(0.78),
             side_alpha: 0.55,
             panel_alpha: 0.25,
-            fit_mode: FitMode::Cover,
             log: String::new(),
             crop_editor: None,
         };
@@ -381,7 +379,6 @@ impl BgToolApp {
             light.as_ref().map(|t| (t.0.as_str(), self.light.alpha)),
             self.side_alpha,
             self.panel_alpha,
-            self.fit_mode,
         );
         match apply_patch(&root, patch.as_deref()) {
             Ok(css) => {
@@ -887,45 +884,11 @@ fn strip_patch(css: &str) -> String {
     out
 }
 
-#[derive(Clone, Copy, PartialEq)]
-enum FitMode {
-    Cover,
-    Contain,
-    CoverTop,
-}
-
-impl FitMode {
-    const ALL: [FitMode; 3] = [FitMode::Cover, FitMode::Contain, FitMode::CoverTop];
-
-    fn label(self) -> &'static str {
-        match self {
-            FitMode::Cover => "覆盖（铺满，宽屏会裁切）",
-            FitMode::Contain => "完整包含（全图可见，两侧留底）",
-            FitMode::CoverTop => "覆盖·偏上（保脸部构图）",
-        }
-    }
-
-    fn bg_size(self) -> &'static str {
-        match self {
-            FitMode::Contain => "contain",
-            _ => "cover",
-        }
-    }
-
-    fn bg_pos(self) -> &'static str {
-        match self {
-            FitMode::CoverTop => "center 20%",
-            _ => "center",
-        }
-    }
-}
-
 fn build_patch(
     dark: Option<(&str, f32)>,
     light: Option<(&str, f32)>,
     side_alpha: f32,
     panel_alpha: f32,
-    fit: FitMode,
 ) -> Option<String> {
     if dark.is_none() && light.is_none() {
         return None;
@@ -940,9 +903,7 @@ fn build_patch(
                 .replace("{B64}", b64)
                 .replace("{DA}", &format!("{da:.2}"))
                 .replace("{SA}", &sa)
-                .replace("{PA}", &pa)
-                .replace("{BS}", fit.bg_size())
-                .replace("{BP}", fit.bg_pos()),
+                .replace("{PA}", &pa),
         );
     }
     if let Some((b64, la)) = light {
@@ -951,9 +912,7 @@ fn build_patch(
                 .replace("{B64}", b64)
                 .replace("{LA}", &format!("{la:.2}"))
                 .replace("{SA}", &sa)
-                .replace("{PA}", &pa)
-                .replace("{BS}", fit.bg_size())
-                .replace("{BP}", fit.bg_pos()),
+                .replace("{PA}", &pa),
         );
     }
     out.push_str("/* === kimi-wallpaper-patch end === */\n");
@@ -1301,13 +1260,6 @@ impl eframe::App for BgToolApp {
                     .text("面板透明度（右侧预览/聊天面板）")
                     .fixed_decimals(2),
             );
-            egui::ComboBox::from_label("填充模式")
-                .selected_text(self.fit_mode.label())
-                .show_ui(ui, |ui| {
-                    for m in FitMode::ALL {
-                        ui.selectable_value(&mut self.fit_mode, m, m.label());
-                    }
-                });
 
             ui.add_space(4.0);
             ui.horizontal(|ui| {
@@ -1452,7 +1404,7 @@ mod tests {
         assert!(orig_len > 0 && comp_len > 0);
         assert!(!b64.is_empty());
 
-        let patch = build_patch(Some((&b64, 0.80)), None, 0.55, 0.25, FitMode::Cover).unwrap();
+        let patch = build_patch(Some((&b64, 0.80)), None, 0.55, 0.25).unwrap();
         apply_patch(&root, Some(&patch)).unwrap();
 
         let bak = backup_path(&css_path);
@@ -1474,7 +1426,7 @@ mod tests {
         assert!(css.contains("@media (prefers-color-scheme:dark)"));
 
         // 再次应用：不重复追加补丁段，备份不被覆盖
-        let patch2 = build_patch(Some((&b64, 0.80)), None, 0.55, 0.25, FitMode::Cover).unwrap();
+        let patch2 = build_patch(Some((&b64, 0.80)), None, 0.55, 0.25).unwrap();
         apply_patch(&root, Some(&patch2)).unwrap();
         let css2 = fs::read_to_string(&css_path).unwrap();
         assert_eq!(css2.matches(PATCH_HEADER).count(), 1, "重复应用不应产生重复补丁段");
@@ -1491,7 +1443,7 @@ mod tests {
         let (d64, _, _, _) = process_image(&dark_png, None).unwrap();
         let (l64, _, _, _) = process_image(&light_png, None).unwrap();
 
-        let patch = build_patch(Some((&d64, 0.80)), Some((&l64, 0.78)), 0.55, 0.25, FitMode::Cover).unwrap();
+        let patch = build_patch(Some((&d64, 0.80)), Some((&l64, 0.78)), 0.55, 0.25).unwrap();
         apply_patch(&root, Some(&patch)).unwrap();
 
         let css = fs::read_to_string(&css_path).unwrap();
@@ -1508,19 +1460,11 @@ mod tests {
     }
 
     #[test]
-    fn test_fit_mode_variants() {
-        let cover = build_patch(Some((&"x".repeat(8), 0.80)), None, 0.55, 0.25, FitMode::Cover).unwrap();
-        assert!(cover.contains("background-size:cover,cover"));
-        assert!(cover.contains("background-position:center,center"));
-
-        let contain = build_patch(Some((&"x".repeat(8), 0.80)), None, 0.55, 0.25, FitMode::Contain).unwrap();
-        assert!(contain.contains("background-size:cover,contain"));
-        assert!(!contain.contains("{BS}"), "占位符应全部被替换");
-
-        let top = build_patch(Some((&"x".repeat(8), 0.80)), None, 0.55, 0.25, FitMode::CoverTop).unwrap();
-        assert!(top.contains("background-size:cover,cover"));
-        assert!(top.contains("background-position:center,center 20%"));
-        assert!(!top.contains("{BP}"), "占位符应全部被替换");
+    fn test_patch_fixed_cover() {
+        let patch = build_patch(Some((&"x".repeat(8), 0.80)), None, 0.55, 0.25).unwrap();
+        assert!(patch.contains("background-size:cover,cover"));
+        assert!(patch.contains("background-position:center,center"));
+        assert!(!patch.contains("{BS}") && !patch.contains("{BP}"), "不应再有填充模式占位符");
     }
 
     #[test]
@@ -1529,7 +1473,7 @@ mod tests {
         let img_path = root.join("dark.png");
         make_test_image(&img_path);
         let (b64, _, _, _) = process_image(&img_path, None).unwrap();
-        let patch = build_patch(Some((&b64, 0.80)), None, 0.55, 0.25, FitMode::Cover).unwrap();
+        let patch = build_patch(Some((&b64, 0.80)), None, 0.55, 0.25).unwrap();
         apply_patch(&root, Some(&patch)).unwrap();
         assert!(fs::read_to_string(&css_path).unwrap().contains(PATCH_START));
 

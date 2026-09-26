@@ -24,18 +24,24 @@ cargo test --release     # 全部测试必须通过
 - 透明化名单（`.app/.con/body/#app` 全透明、`.side/.windows-titlebar` 侧边栏透明度、`.global-preview/.agent-panel/.file-preview/.fp-body/.ui-panel-header/.chat-header/.topbar` 面板透明度、`.chat-dock:before`）是反复用 CDP 探针排出来的，dark/light/system 三套镜像必须同步改
 
 ### 热更新
-- 探针块（`kimi-wallpaper-hot-hook`）插在 `index.html` 最后一个 `</body>` 前；index.html 也有 `.wallpaper-bak` 备份
-- 热更文件：`kimi-wallpaper-hot.css`（=补丁全文）+ `kimi-wallpaper-hot.json`（`{"v":N}`）。**必须先写 css 后写 json**，版本号 `max(旧+1, unix毫秒)`，探针以 json 为准
+- 探针块（`kimi-wallpaper-hot-hook`）插在 `index.html` 最后一个 `</body>` 前；index.html 也有 `.wallpaper-bak` 备份。当前为 **v2**（块内 `<!-- version: v2 -->` 标记，`HOOK_VERSION_MARK`）
+- v2 探针维护两层：`<video>` 背景层（z-index:-2，muted/loop/autoplay/playsInline，object-fit:cover）+ 独立遮罩 `<div>`（z-index:-1，`background:var(--kimi-wallpaper-mask,transparent)`，该 CSS 变量由补丁按 dark/light/system 定义，遮罩随主题自动切换，探针不感知主题）
+- 热更文件：`kimi-wallpaper-hot.css`（=补丁全文）+ `kimi-wallpaper-hot.json`（`{"v":N,"video":"kimi-wallpaper-video.mp4"|null}`）。**必须先写 css 后写 json**，版本号 `max(旧+1, unix毫秒)`，探针以 json 为准；video 字段驱动视频层挂载/移除
+- 视频文件不内嵌：应用时拷贝到 `desktop-dist\kimi-wallpaper-video.mp4` 固定名，探针以 `/kimi-wallpaper-video.mp4` 绝对路径引用（app:// 同目录可读）
 - 探针 fetch **必须用绝对路径** `/kimi-wallpaper-hot.*`——相对路径在 `/sessions/<id>` 路由下会 404 静默失效（踩过的坑）
+- 升级检测：`hook_needs_upgrade` = 含起始标记但缺 `HOOK_VERSION_MARK`（v1 旧块）。`install_hook` 幂等策略：未安装→插入；v1→remove 旧块再插 v2；已 v2→原样返回。UI 三态：v2 绿「已启用 v2」/ v1 黄「需升级」（按钮「升级热更新」）/ 未装「未启用」
 - Kimi Code 应用更新会冲掉 index.html（探针）和 main-*.css（补丁），热更文件可能幸存但成孤儿。更新后的恢复流程见 `T:\KCD BackGrond\热更新探针-档案与恢复指南.md`
 
 ### 图片管线
-- `process_image(path, crop)`：load_from_memory → 可选 crop_imm 裁剪（归一化 CropRect 转像素，round+clamp，宽高≥1）→ 最长边压到 2560 → JPEG（先 q82，超 900KB 降 q70）→ base64
-- `MAX_JPEG_BYTES = 900KB`：base64 内嵌进 CSS，太大样式表会膨胀
+- `process_image(path, crop)` 返回 `ProcessedImage{b64, orig_len, comp_len, cropped, mime}`：普通图走 load_from_memory → 可选 crop_imm 裁剪（归一化 CropRect 转像素，round+clamp，宽高≥1）→ 最长边压到 2560 → JPEG（先 q82，超 900KB 降 q70）→ base64，`mime="image/jpeg"`
+- **GIF 透传**：扩展名 `.gif` 不走 image crate，原始字节直接 base64（保留动画），`mime="image/gif"`；与裁剪冲突时忽略裁剪并日志「GIF 动画不支持裁剪，已整图嵌入」；原始字节 > 1.5MB（`GIF_WARN_BYTES`）日志体积警告
+- `MAX_JPEG_BYTES = 900KB`：base64 内嵌进 CSS，太大样式表会膨胀。补丁模板的 `data:{MIME};base64,{B64}` 占位符按槽位 mime 替换
+- 模板另定义 `--kimi-wallpaper-mask` 变量（dark 两处 `rgba(7,7,13,{DA})`、light 两处 `rgba(250,250,252,{LA})`，各含 scheme/system 选择器），给视频遮罩层用；原有背景渐变遮罩保留作兜底
 - 裁剪选区 `CropRect` 是归一化坐标（0..1），随配置持久化到 `kimi-bg-tool.conf`（见下节），启动时恢复
+- **耗电警告**：GIF 槽选中、视频槽常驻显示橙色警告「持续占用 CPU/GPU，会增加耗电」；视频部署/GIF 嵌入时日志同步警告
 
 ### 配置持久化
-- `kimi-bg-tool.conf`（exe 同目录，`conf_path()` 基于 `current_exe`，失败则静默跳过）：`key=value` 每行一条，持久化安装路径、side/panel 透明度、两槽位的 path/alpha/裁剪选区（`x,y,w,h` 逗号分隔，None 不写行）。解析用 `splitn(2, '=')`，路径含 `=`/中文安全
+- `kimi-bg-tool.conf`（exe 同目录，`conf_path()` 基于 `current_exe`，失败则静默跳过）：`key=value` 每行一条，持久化安装路径、side/panel 透明度、两槽位的 path/alpha/裁剪选区（`x,y,w,h` 逗号分隔，None 不写行）、视频路径（`video.path`）。解析用 `splitn(2, '=')`，路径含 `=`/中文安全
 - `SettingsSnapshot::to_conf/from_conf` 纯函数（有单测），from_conf 对缺行/坏行/未知键容错，缺字段取默认值（alpha 0.80/0.78/0.55/0.25）
 - 防抖 500ms 写盘：`update_persistence` 每帧比对 `snapshot().to_conf()`，变了记 `save_due`，到期才 `fs::write`；`request_repaint_after` 保证工具闲置时到期帧被唤醒落盘。写失败仅记一行日志不重试刷屏
 - 启动恢复顺序：注册表自动检测在前 → conf 覆盖（conf 字段优先，用户手改的安装路径高于注册表）→ 槽位图片文件失效时清槽并记日志「上次选择的图片已失效: <路径>」

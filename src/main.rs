@@ -17,34 +17,47 @@ const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 
 const HOT_HOOK_START: &str = "<!-- === kimi-wallpaper-hot-hook === -->";
 const HOT_HOOK_END: &str = "<!-- === kimi-wallpaper-hot-hook end === -->";
+const HOOK_VERSION_MARK: &str = "<!-- version: v2 -->";
+const VIDEO_FILE_NAME: &str = "kimi-wallpaper-video.mp4";
+const GIF_WARN_BYTES: usize = 3 * 512 * 1024; // 1.5MB
 
 const HOT_HOOK_BLOCK: &str = r#"    <!-- === kimi-wallpaper-hot-hook === -->
+    <!-- version: v2 -->
     <script>
       (function () {
         var STYLE_ID = 'kimi-wallpaper-hot-style';
-        var cur = null;
+        var VIDEO_ID = 'kimi-wallpaper-hot-video';
+        var MASK_ID = 'kimi-wallpaper-hot-mask';
+        var cur = null, curVideo;
         function applyCss(css) {
           var el = document.getElementById(STYLE_ID);
-          if (!el) {
-            el = document.createElement('style');
-            el.id = STYLE_ID;
-            document.head.appendChild(el);
-          }
+          if (!el) { el = document.createElement('style'); el.id = STYLE_ID; document.head.appendChild(el); }
           if (el.textContent !== css) el.textContent = css;
+        }
+        function applyVideo(name) {
+          if (name === curVideo) return; curVideo = name;
+          var v = document.getElementById(VIDEO_ID), m = document.getElementById(MASK_ID);
+          if (!name) { if (v) v.remove(); if (m) m.remove(); return; }
+          if (!v) { v = document.createElement('video'); v.id = VIDEO_ID; document.body.appendChild(v); }
+          v.muted = true; v.loop = true; v.autoplay = true; v.playsInline = true;
+          v.setAttribute('style', 'position:fixed;left:0;top:0;width:100%;height:100%;object-fit:cover;z-index:-2;pointer-events:none');
+          v.src = '/' + name + '?v=' + Date.now();
+          v.play().catch(function () {});
+          if (!m) { m = document.createElement('div'); m.id = MASK_ID; document.body.appendChild(m); }
+          m.setAttribute('style', 'position:fixed;left:0;top:0;width:100%;height:100%;z-index:-1;pointer-events:none;background:var(--kimi-wallpaper-mask,transparent)');
         }
         function tick() {
           fetch('/kimi-wallpaper-hot.json?_=' + Date.now(), { cache: 'no-store' })
-            .then(function (r) {
-              if (!r.ok) return null;
-              return r.json();
-            })
+            .then(function (r) { if (!r.ok) return null; return r.json(); })
             .then(function (j) {
-              if (!j || typeof j.v === 'undefined' || j.v === cur) return;
+              if (!j || typeof j.v === 'undefined') return;
+              applyVideo(typeof j.video === 'string' && j.video ? j.video : null);
+              if (j.v === cur) return;
               return fetch('/kimi-wallpaper-hot.css?v=' + encodeURIComponent(j.v), { cache: 'no-store' })
                 .then(function (rc) { return rc.ok ? rc.text() : ''; })
                 .then(function (css) { applyCss(css); cur = j.v; });
             })
-            .catch(function () { /* hot files absent: keep last applied state */ });
+            .catch(function () { });
         }
         tick();
         setInterval(tick, 2000);
@@ -52,7 +65,8 @@ const HOT_HOOK_BLOCK: &str = r#"    <!-- === kimi-wallpaper-hot-hook === -->
     </script>
     <!-- === kimi-wallpaper-hot-hook end === -->"#;
 
-const DARK_TEMPLATE: &str = r#":root{--kimi-wallpaper-dark:url("data:image/jpeg;base64,{B64}")}
+const DARK_TEMPLATE: &str = r#":root{--kimi-wallpaper-dark:url("data:{MIME};base64,{B64}")}
+html[data-color-scheme=dark]{--kimi-wallpaper-mask:rgba(7,7,13,{DA})}
 html[data-color-scheme=dark]{background-color:#0a0a10;background-image:linear-gradient(rgba(7,7,13,{DA}),rgba(7,7,13,{DA})),var(--kimi-wallpaper-dark) !important;background-size:cover,cover;background-position:center,center;background-repeat:no-repeat,no-repeat;background-attachment:fixed,fixed}
 html[data-color-scheme=dark] .app,html[data-color-scheme=dark] .con,html[data-color-scheme=dark] body,html[data-color-scheme=dark] #app{background:transparent !important}
 html[data-color-scheme=dark] .side,html[data-color-scheme=dark] .windows-titlebar{background:rgba(10,10,17,{SA}) !important}
@@ -60,6 +74,7 @@ html[data-color-scheme=dark] .global-preview,html[data-color-scheme=dark] .agent
 html[data-color-scheme=dark] .chat-header,html[data-color-scheme=dark] .topbar{background:rgba(10,10,17,{PA}) !important}
 html[data-color-scheme=dark] .chat-dock:before{opacity:.45 !important}
 @media (prefers-color-scheme:dark){
+html[data-color-scheme=system]{--kimi-wallpaper-mask:rgba(7,7,13,{DA})}
 html[data-color-scheme=system]{background-color:#0a0a10;background-image:linear-gradient(rgba(7,7,13,{DA}),rgba(7,7,13,{DA})),var(--kimi-wallpaper-dark) !important;background-size:cover,cover;background-position:center,center;background-repeat:no-repeat,no-repeat;background-attachment:fixed,fixed}
 html[data-color-scheme=system] .app,html[data-color-scheme=system] .con,html[data-color-scheme=system] body,html[data-color-scheme=system] #app{background:transparent !important}
 html[data-color-scheme=system] .side,html[data-color-scheme=system] .windows-titlebar{background:rgba(10,10,17,{SA}) !important}
@@ -69,7 +84,8 @@ html[data-color-scheme=system] .chat-dock:before{opacity:.45 !important}
 }
 "#;
 
-const LIGHT_TEMPLATE: &str = r#":root{--kimi-wallpaper-light:url("data:image/jpeg;base64,{B64}")}
+const LIGHT_TEMPLATE: &str = r#":root{--kimi-wallpaper-light:url("data:{MIME};base64,{B64}")}
+html[data-color-scheme=light]{--kimi-wallpaper-mask:rgba(250,250,252,{LA})}
 html[data-color-scheme=light]{background-color:#f5f5f7;background-image:linear-gradient(rgba(250,250,252,{LA}),rgba(250,250,252,{LA})),var(--kimi-wallpaper-light) !important;background-size:cover,cover;background-position:center,center;background-repeat:no-repeat,no-repeat;background-attachment:fixed,fixed}
 html[data-color-scheme=light] .app,html[data-color-scheme=light] .con,html[data-color-scheme=light] body,html[data-color-scheme=light] #app{background:transparent !important}
 html[data-color-scheme=light] .side,html[data-color-scheme=light] .windows-titlebar{background:rgba(255,255,255,{SA}) !important}
@@ -77,6 +93,7 @@ html[data-color-scheme=light] .global-preview,html[data-color-scheme=light] .age
 html[data-color-scheme=light] .chat-header,html[data-color-scheme=light] .topbar{background:rgba(255,255,255,{PA}) !important}
 html[data-color-scheme=light] .chat-dock:before{opacity:.45 !important}
 @media (prefers-color-scheme:light){
+html[data-color-scheme=system]{--kimi-wallpaper-mask:rgba(250,250,252,{LA})}
 html[data-color-scheme=system]{background-color:#f5f5f7;background-image:linear-gradient(rgba(250,250,252,{LA}),rgba(250,250,252,{LA})),var(--kimi-wallpaper-light) !important;background-size:cover,cover;background-position:center,center;background-repeat:no-repeat,no-repeat;background-attachment:fixed,fixed}
 html[data-color-scheme=system] .app,html[data-color-scheme=system] .con,html[data-color-scheme=system] body,html[data-color-scheme=system] #app{background:transparent !important}
 html[data-color-scheme=system] .side,html[data-color-scheme=system] .windows-titlebar{background:rgba(255,255,255,{SA}) !important}
@@ -253,6 +270,7 @@ struct SettingsSnapshot {
     light_path: Option<PathBuf>,
     light_alpha: f32,
     light_crop: Option<CropRect>,
+    video_path: Option<PathBuf>,
 }
 
 impl Default for SettingsSnapshot {
@@ -267,6 +285,7 @@ impl Default for SettingsSnapshot {
             light_alpha: 0.78,
             dark_crop: None,
             light_crop: None,
+            video_path: None,
         }
     }
 }
@@ -291,6 +310,9 @@ impl SettingsSnapshot {
         }
         if let Some(c) = &self.light_crop {
             out.push_str(&format!("light.crop={},{},{},{}\n", c.x, c.y, c.w, c.h));
+        }
+        if let Some(p) = &self.video_path {
+            out.push_str(&format!("video.path={}\n", p.display()));
         }
         out
     }
@@ -336,6 +358,9 @@ impl SettingsSnapshot {
                 }
                 "dark.crop" => snap.dark_crop = parse_crop(val),
                 "light.crop" => snap.light_crop = parse_crop(val),
+                "video.path" => {
+                    snap.video_path = (!val.is_empty()).then(|| PathBuf::from(val));
+                }
                 _ => {} // 未知键忽略
             }
         }
@@ -364,9 +389,11 @@ struct BgToolApp {
     patched: bool,
     bak_exists: bool,
     hot_enabled: bool,
+    hot_needs_upgrade: bool,
     status_err: Option<String>,
     dark: Slot,
     light: Slot,
+    video_path: Option<PathBuf>,
     side_alpha: f32,
     panel_alpha: f32,
     log: String,
@@ -385,9 +412,11 @@ impl BgToolApp {
             patched: false,
             bak_exists: false,
             hot_enabled: false,
+            hot_needs_upgrade: false,
             status_err: None,
             dark: Slot::new(0.80),
             light: Slot::new(0.78),
+            video_path: None,
             side_alpha: 0.55,
             panel_alpha: 0.25,
             log: String::new(),
@@ -433,6 +462,7 @@ impl BgToolApp {
             light_path: self.light.path.clone(),
             light_alpha: self.light.alpha,
             light_crop: self.light.crop,
+            video_path: self.video_path.clone(),
         }
     }
 
@@ -446,6 +476,14 @@ impl BgToolApp {
         ];
         for m in msgs.into_iter().flatten() {
             self.log_push(&m);
+        }
+        self.video_path = None;
+        if let Some(p) = &s.video_path {
+            if p.is_file() {
+                self.video_path = Some(p.clone());
+            } else {
+                self.log_push(&format!("上次选择的视频已失效: {}", p.display()));
+            }
         }
     }
 
@@ -515,6 +553,7 @@ impl BgToolApp {
         self.patched = false;
         self.bak_exists = false;
         self.hot_enabled = false;
+        self.hot_needs_upgrade = false;
         self.status_err = None;
         self.root = None;
 
@@ -534,6 +573,7 @@ impl BgToolApp {
         let dist = root.join("resources").join("desktop-dist");
         if let Ok(index_html) = fs::read_to_string(dist.join("index.html")) {
             self.hot_enabled = hook_installed(&index_html);
+            self.hot_needs_upgrade = hook_needs_upgrade(&index_html);
         }
         match locate_main_css(&root) {
             Ok(css) => {
@@ -554,10 +594,33 @@ impl BgToolApp {
     fn process_slot(
         path: &Option<PathBuf>,
         crop: Option<CropRect>,
-    ) -> Result<Option<(String, usize, usize, Option<(u32, u32)>)>, String> {
+    ) -> Result<Option<ProcessedImage>, String> {
         match path {
             None => Ok(None),
             Some(p) => process_image(p, crop).map(Some).map_err(|e| format!("{e:#}")),
+        }
+    }
+
+    fn log_processed(&mut self, label: &str, p: &ProcessedImage, had_crop: bool) {
+        if p.mime == "image/gif" {
+            self.log_push(&format!("{label}: GIF 动画原样嵌入，原始 {} 字节", p.orig_len));
+            if had_crop {
+                self.log_push(&format!("{label}: GIF 动画不支持裁剪，已整图嵌入"));
+            }
+            if p.comp_len > GIF_WARN_BYTES {
+                self.log_push(&format!(
+                    "{label}: GIF 体积较大（{:.1} MB），将显著增大样式表并增加内存占用",
+                    p.comp_len as f64 / 1024.0 / 1024.0
+                ));
+            }
+            return;
+        }
+        self.log_push(&format!("{label}: 原始 {} 字节 -> JPEG {} 字节", p.orig_len, p.comp_len));
+        if let Some((w, h)) = p.cropped {
+            self.log_push(&format!("{label}: 已按选区裁剪为 {}×{} px", w, h));
+        }
+        if p.comp_len > MAX_JPEG_BYTES {
+            self.log_push(&format!("{label}: 警告压缩后仍超过 900KB，可能导致样式表过大"));
         }
     }
 
@@ -569,6 +632,7 @@ impl BgToolApp {
                 return;
             }
         };
+        let dist = root.join("resources").join("desktop-dist");
         let dark = match Self::process_slot(&self.dark.path, self.dark.crop) {
             Ok(v) => v,
             Err(e) => {
@@ -583,27 +647,38 @@ impl BgToolApp {
                 return;
             }
         };
-        if let Some((_, orig, comp, cropped)) = &dark {
-            self.log_push(&format!("深色图: 原始 {} 字节 -> JPEG {} 字节", orig, comp));
-            if let Some((w, h)) = cropped {
-                self.log_push(&format!("深色图: 已按选区裁剪为 {}×{} px", w, h));
-            }
-            if comp > &MAX_JPEG_BYTES {
-                self.log_push("警告: 深色图压缩后仍超过 900KB，可能导致样式表过大");
-            }
+        if let Some(p) = &dark {
+            self.log_processed("深色图", p, self.dark.crop.is_some());
         }
-        if let Some((_, orig, comp, cropped)) = &light {
-            self.log_push(&format!("浅色图: 原始 {} 字节 -> JPEG {} 字节", orig, comp));
-            if let Some((w, h)) = cropped {
-                self.log_push(&format!("浅色图: 已按选区裁剪为 {}×{} px", w, h));
-            }
-            if comp > &MAX_JPEG_BYTES {
-                self.log_push("警告: 浅色图压缩后仍超过 900KB，可能导致样式表过大");
-            }
+        if let Some(p) = &light {
+            self.log_processed("浅色图", p, self.light.crop.is_some());
         }
+        // 视频部署：拷贝到 desktop-dist 固定名，探针以 /kimi-wallpaper-video.mp4 引用
+        let video_name = match &self.video_path {
+            Some(src) => match fs::copy(src, dist.join(VIDEO_FILE_NAME)) {
+                Ok(n) => {
+                    self.log_push(&format!("视频已部署: {:.1} MB", n as f64 / 1024.0 / 1024.0));
+                    self.log_push("警告: 视频背景持续解码播放，会增加耗电（笔记本用电池时更明显）");
+                    Some(VIDEO_FILE_NAME.to_string())
+                }
+                Err(e) => {
+                    self.log_push(&format!("视频部署失败: {e:#}"));
+                    None
+                }
+            },
+            None => {
+                let dest = dist.join(VIDEO_FILE_NAME);
+                if dest.exists() {
+                    if let Err(e) = fs::remove_file(&dest) {
+                        self.log_push(&format!("清理旧视频文件失败: {e:#}"));
+                    }
+                }
+                None
+            }
+        };
         let patch = build_patch(
-            dark.as_ref().map(|t| (t.0.as_str(), self.dark.alpha)),
-            light.as_ref().map(|t| (t.0.as_str(), self.light.alpha)),
+            dark.as_ref().map(|t| (t.b64.as_str(), self.dark.alpha, t.mime)),
+            light.as_ref().map(|t| (t.b64.as_str(), self.light.alpha, t.mime)),
             self.side_alpha,
             self.panel_alpha,
         );
@@ -614,8 +689,7 @@ impl BgToolApp {
                 } else {
                     self.log_push("两个槽位均为空，已移除补丁（纯还原）");
                 }
-                let dist = root.join("resources").join("desktop-dist");
-                match write_hot_files(&dist, patch.as_deref().unwrap_or("")) {
+                match write_hot_files(&dist, patch.as_deref().unwrap_or(""), video_name.as_deref()) {
                     Ok(_) => {
                         if self.hot_enabled {
                             self.log_push("热更新已推送：运行中的 Kimi Code 约 2 秒内自动生效，无需重启");
@@ -643,7 +717,7 @@ impl BgToolApp {
             Ok(css) => {
                 self.log_push(&format!("已从备份还原: {}", css.display()));
                 let dist = root.join("resources").join("desktop-dist");
-                match write_hot_files(&dist, "") {
+                match write_hot_files(&dist, "", None) {
                     Ok(_) => {
                         if self.hot_enabled {
                             self.log_push("热更新已推送：运行中的 Kimi Code 约 2 秒内自动生效，无需重启");
@@ -669,6 +743,10 @@ impl BgToolApp {
         };
         let dist = root.join("resources").join("desktop-dist");
         let index = dist.join("index.html");
+        // 先探测是否旧版升级，用于区分结果日志
+        let upgrading = fs::read_to_string(&index)
+            .map(|c| hook_needs_upgrade(&c))
+            .unwrap_or(false);
         let result = (|| -> anyhow::Result<()> {
             let content = fs::read_to_string(&index)
                 .with_context(|| format!("读取 {} 失败", index.display()))?;
@@ -683,10 +761,13 @@ impl BgToolApp {
                     .with_context(|| format!("写入 index.html 失败: {}", index.display()))?;
             }
             // 放好初始热更文件，探针启动即有可拉取内容
-            write_hot_files(&dist, "")?;
+            write_hot_files(&dist, "", None)?;
             Ok(())
         })();
         match result {
+            Ok(_) if upgrading => {
+                self.log_push("热更新已升级到 v2（支持视频背景），重启 Kimi Code 一次后生效")
+            }
             Ok(_) => self.log_push("热更新已安装，重启 Kimi Code 一次后永久生效，之后打补丁无需重启"),
             Err(e) => self.log_push(&format!("安装热更新失败: {e:#}")),
         }
@@ -1112,8 +1193,8 @@ fn strip_patch(css: &str) -> String {
 }
 
 fn build_patch(
-    dark: Option<(&str, f32)>,
-    light: Option<(&str, f32)>,
+    dark: Option<(&str, f32, &str)>,
+    light: Option<(&str, f32, &str)>,
     side_alpha: f32,
     panel_alpha: f32,
 ) -> Option<String> {
@@ -1124,22 +1205,24 @@ fn build_patch(
     let pa = format!("{panel_alpha:.2}");
     let mut out = String::from(PATCH_HEADER);
     out.push('\n');
-    if let Some((b64, da)) = dark {
+    if let Some((b64, da, mime)) = dark {
         out.push_str(
             &DARK_TEMPLATE
                 .replace("{B64}", b64)
                 .replace("{DA}", &format!("{da:.2}"))
                 .replace("{SA}", &sa)
-                .replace("{PA}", &pa),
+                .replace("{PA}", &pa)
+                .replace("{MIME}", mime),
         );
     }
-    if let Some((b64, la)) = light {
+    if let Some((b64, la, mime)) = light {
         out.push_str(
             &LIGHT_TEMPLATE
                 .replace("{B64}", b64)
                 .replace("{LA}", &format!("{la:.2}"))
                 .replace("{SA}", &sa)
-                .replace("{PA}", &pa),
+                .replace("{PA}", &pa)
+                .replace("{MIME}", mime),
         );
     }
     out.push_str("/* === kimi-wallpaper-patch end === */\n");
@@ -1193,8 +1276,9 @@ fn hot_json_path(dist_root: &Path) -> PathBuf {
     dist_root.join("kimi-wallpaper-hot.json")
 }
 
-/// 写热更 css（空字符串=无壁纸）和版本文件 {"v":N}。先写 css 后写 json（探针以 json 为准）。
-fn write_hot_files(dist_root: &Path, patch_css: &str) -> anyhow::Result<()> {
+/// 写热更 css（空字符串=无壁纸）和版本文件 {"v":N,"video":"name"|null}。
+/// 先写 css 后写 json（探针以 json 为准）。
+fn write_hot_files(dist_root: &Path, patch_css: &str, video: Option<&str>) -> anyhow::Result<()> {
     let re = regex::Regex::new(r#""v"\s*:\s*(\d+)"#)?;
     let old_v: u64 = fs::read_to_string(hot_json_path(dist_root))
         .ok()
@@ -1211,9 +1295,12 @@ fn write_hot_files(dist_root: &Path, patch_css: &str) -> anyhow::Result<()> {
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
     let new_v = old_v.saturating_add(1).max(now_ms);
+    let json = match video {
+        Some(name) => format!("{{\"v\":{new_v},\"video\":\"{name}\"}}"),
+        None => format!("{{\"v\":{new_v},\"video\":null}}"),
+    };
     fs::write(hot_css_path(dist_root), patch_css).context("写入热更 css 失败")?;
-    fs::write(hot_json_path(dist_root), format!("{{\"v\":{new_v}}}"))
-        .context("写入热更版本文件失败")?;
+    fs::write(hot_json_path(dist_root), json).context("写入热更版本文件失败")?;
     Ok(())
 }
 
@@ -1221,19 +1308,30 @@ fn hook_installed(index_html_content: &str) -> bool {
     index_html_content.contains(HOT_HOOK_START)
 }
 
-/// 在最后一个 </body> 前插入热更新探针；已含标记时原样返回（幂等）。
+/// 已装探针但缺 v2 版本标记（旧版 v1）时需要升级。
+fn hook_needs_upgrade(index_html_content: &str) -> bool {
+    hook_installed(index_html_content) && !index_html_content.contains(HOOK_VERSION_MARK)
+}
+
+/// 在最后一个 </body> 前插入热更新探针；已是最新 v2 时原样返回（幂等），
+/// 已装旧版则先移除旧块再插入新块（升级）。
 fn install_hook(index_html_content: &str) -> anyhow::Result<String> {
-    if hook_installed(index_html_content) {
+    if hook_installed(index_html_content) && !hook_needs_upgrade(index_html_content) {
         return Ok(index_html_content.to_string());
     }
-    let pos = index_html_content
+    let base = if hook_needs_upgrade(index_html_content) {
+        remove_hook(index_html_content)
+    } else {
+        index_html_content.to_string()
+    };
+    let pos = base
         .rfind("</body>")
         .ok_or_else(|| anyhow!("index.html 中未找到 </body>，无法植入热更新探针"))?;
-    let mut out = String::with_capacity(index_html_content.len() + HOT_HOOK_BLOCK.len() + 1);
-    out.push_str(&index_html_content[..pos]);
+    let mut out = String::with_capacity(base.len() + HOT_HOOK_BLOCK.len() + 1);
+    out.push_str(&base[..pos]);
     out.push_str(HOT_HOOK_BLOCK);
     out.push('\n');
-    out.push_str(&index_html_content[pos..]);
+    out.push_str(&base[pos..]);
     Ok(out)
 }
 
@@ -1259,12 +1357,31 @@ fn remove_hook(index_html_content: &str) -> String {
 
 // ---------- 图片处理 ----------
 
-fn process_image(path: &Path, crop: Option<CropRect>) -> anyhow::Result<(String, usize, usize, Option<(u32, u32)>)> {
+struct ProcessedImage {
+    b64: String,
+    orig_len: usize,
+    comp_len: usize,
+    cropped: Option<(u32, u32)>,
+    mime: &'static str,
+}
+
+fn process_image(path: &Path, crop: Option<CropRect>) -> anyhow::Result<ProcessedImage> {
     use base64::Engine as _;
     use image::ImageEncoder;
 
     let data = fs::read(path).with_context(|| format!("读取图片失败: {}", path.display()))?;
     let orig_len = data.len();
+    // GIF 不解码、不压缩：原始字节直接 base64 内嵌，保留动画
+    if path.extension().map(|e| e.eq_ignore_ascii_case("gif")).unwrap_or(false) {
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+        return Ok(ProcessedImage {
+            b64,
+            orig_len,
+            comp_len: orig_len,
+            cropped: None,
+            mime: "image/gif",
+        });
+    }
     let img = image::load_from_memory(&data).context("解析图片失败（格式不支持或文件损坏）")?;
     // 先按归一化选区裁剪，再走现有缩放/JPEG 流程
     let (img, cropped) = if let Some(c) = crop {
@@ -1310,7 +1427,7 @@ fn process_image(path: &Path, crop: Option<CropRect>) -> anyhow::Result<(String,
     }
     let comp_len = buf.len();
     let b64 = base64::engine::general_purpose::STANDARD.encode(&buf);
-    Ok((b64, orig_len, comp_len, cropped))
+    Ok(ProcessedImage { b64, orig_len, comp_len, cropped, mime: "image/jpeg" })
 }
 
 fn load_preview(ctx: &egui::Context, path: &Path, max_side: u32) -> anyhow::Result<egui::TextureHandle> {
@@ -1364,6 +1481,18 @@ fn slot_ui(ui: &mut egui::Ui, title: &str, slot: &mut Slot, ctx: &egui::Context,
         if slot.crop.is_some() {
             ui.colored_label(egui::Color32::from_rgb(120, 220, 120), "已裁剪");
         }
+        let is_gif = slot
+            .path
+            .as_ref()
+            .and_then(|p| p.extension())
+            .map(|e| e.eq_ignore_ascii_case("gif"))
+            .unwrap_or(false);
+        if is_gif {
+            ui.colored_label(
+                egui::Color32::from_rgb(230, 160, 60),
+                "GIF 动图持续解码播放，会增加耗电（笔记本用电池时更明显）",
+            );
+        }
         ui.horizontal(|ui| {
             if ui.button("选择图片").clicked() {
                 let picked = rfd::FileDialog::new()
@@ -1387,7 +1516,7 @@ fn slot_ui(ui: &mut egui::Ui, title: &str, slot: &mut Slot, ctx: &egui::Context,
                 slot.crop = None;
             }
             if ui
-                .add_enabled(slot.path.is_some(), egui::Button::new("裁剪..."))
+                .add_enabled(slot.path.is_some() && !is_gif, egui::Button::new("裁剪..."))
                 .clicked()
             {
                 crop_requested = true;
@@ -1454,7 +1583,11 @@ impl eframe::App for BgToolApp {
                     ui.colored_label(egui::Color32::DARK_GRAY, "无备份");
                 }
                 if self.hot_enabled {
-                    ui.colored_label(egui::Color32::from_rgb(120, 220, 120), "热更新: 已启用");
+                    if self.hot_needs_upgrade {
+                        ui.colored_label(egui::Color32::from_rgb(230, 200, 90), "热更新: 需升级");
+                    } else {
+                        ui.colored_label(egui::Color32::from_rgb(120, 220, 120), "热更新: 已启用 v2");
+                    }
                 } else {
                     ui.colored_label(egui::Color32::DARK_GRAY, "热更新: 未启用");
                 }
@@ -1476,6 +1609,43 @@ impl eframe::App for BgToolApp {
             if let Some(kind) = crop_req {
                 self.open_crop_editor(kind, ctx);
             }
+
+            ui.group(|ui| {
+                ui.label(egui::RichText::new("视频背景（MP4）").strong());
+                match &self.video_path {
+                    Some(p) => {
+                        let name = p
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        ui.label(format!("已选择: {name}"));
+                    }
+                    None => {
+                        ui.label("未选择视频");
+                    }
+                }
+                ui.horizontal(|ui| {
+                    if ui.button("选择视频").clicked() {
+                        let picked = rfd::FileDialog::new()
+                            .add_filter("MP4 视频", &["mp4"])
+                            .pick_file();
+                        if let Some(f) = picked {
+                            self.log_push(&format!("已选择视频: {}", f.display()));
+                            self.video_path = Some(f);
+                        }
+                    }
+                    if ui
+                        .add_enabled(self.video_path.is_some(), egui::Button::new("清除"))
+                        .clicked()
+                    {
+                        self.video_path = None;
+                    }
+                });
+                ui.colored_label(
+                    egui::Color32::from_rgb(230, 160, 60),
+                    "视频/动图背景持续占用 CPU/GPU，会增加耗电（笔记本用电池时更明显）",
+                );
+            });
 
             ui.add(
                 egui::Slider::new(&mut self.side_alpha, 0.0..=0.95)
@@ -1501,18 +1671,25 @@ impl eframe::App for BgToolApp {
                 {
                     self.do_restore();
                 }
-                if !self.hot_enabled {
+                if self.hot_enabled && !self.hot_needs_upgrade {
                     if ui
-                        .add(egui::Button::new("安装热更新").min_size(egui::vec2(100.0, 30.0)))
+                        .add(egui::Button::new("卸载热更新").min_size(egui::vec2(100.0, 30.0)))
+                        .clicked()
+                    {
+                        self.do_remove_hook();
+                    }
+                } else {
+                    let label = if self.hot_needs_upgrade {
+                        "升级热更新"
+                    } else {
+                        "安装热更新"
+                    };
+                    if ui
+                        .add(egui::Button::new(label).min_size(egui::vec2(100.0, 30.0)))
                         .clicked()
                     {
                         self.do_install_hook();
                     }
-                } else if ui
-                    .add(egui::Button::new("卸载热更新").min_size(egui::vec2(100.0, 30.0)))
-                    .clicked()
-                {
-                    self.do_remove_hook();
                 }
             });
 
@@ -1628,11 +1805,11 @@ mod tests {
         let img_path = root.join("dark.png");
         make_test_image(&img_path);
 
-        let (b64, orig_len, comp_len, _) = process_image(&img_path, None).unwrap();
-        assert!(orig_len > 0 && comp_len > 0);
-        assert!(!b64.is_empty());
+        let p = process_image(&img_path, None).unwrap();
+        assert!(p.orig_len > 0 && p.comp_len > 0);
+        assert!(!p.b64.is_empty());
 
-        let patch = build_patch(Some((&b64, 0.80)), None, 0.55, 0.25).unwrap();
+        let patch = build_patch(Some((&p.b64, 0.80, "image/jpeg")), None, 0.55, 0.25).unwrap();
         apply_patch(&root, Some(&patch)).unwrap();
 
         let bak = backup_path(&css_path);
@@ -1654,7 +1831,7 @@ mod tests {
         assert!(css.contains("@media (prefers-color-scheme:dark)"));
 
         // 再次应用：不重复追加补丁段，备份不被覆盖
-        let patch2 = build_patch(Some((&b64, 0.80)), None, 0.55, 0.25).unwrap();
+        let patch2 = build_patch(Some((&p.b64, 0.80, "image/jpeg")), None, 0.55, 0.25).unwrap();
         apply_patch(&root, Some(&patch2)).unwrap();
         let css2 = fs::read_to_string(&css_path).unwrap();
         assert_eq!(css2.matches(PATCH_HEADER).count(), 1, "重复应用不应产生重复补丁段");
@@ -1668,10 +1845,10 @@ mod tests {
         let light_png = root.join("light.png");
         make_test_image(&dark_png);
         make_test_image(&light_png);
-        let (d64, _, _, _) = process_image(&dark_png, None).unwrap();
-        let (l64, _, _, _) = process_image(&light_png, None).unwrap();
+        let d = process_image(&dark_png, None).unwrap();
+        let l = process_image(&light_png, None).unwrap();
 
-        let patch = build_patch(Some((&d64, 0.80)), Some((&l64, 0.78)), 0.55, 0.25).unwrap();
+        let patch = build_patch(Some((&d.b64, 0.80, "image/jpeg")), Some((&l.b64, 0.78, "image/jpeg")), 0.55, 0.25).unwrap();
         apply_patch(&root, Some(&patch)).unwrap();
 
         let css = fs::read_to_string(&css_path).unwrap();
@@ -1689,7 +1866,7 @@ mod tests {
 
     #[test]
     fn test_patch_fixed_cover() {
-        let patch = build_patch(Some((&"x".repeat(8), 0.80)), None, 0.55, 0.25).unwrap();
+        let patch = build_patch(Some((&"x".repeat(8), 0.80, "image/jpeg")), None, 0.55, 0.25).unwrap();
         assert!(patch.contains("background-size:cover,cover"));
         assert!(patch.contains("background-position:center,center"));
         assert!(!patch.contains("{BS}") && !patch.contains("{BP}"), "不应再有填充模式占位符");
@@ -1700,8 +1877,8 @@ mod tests {
         let (root, css_path) = make_fixture("restore");
         let img_path = root.join("dark.png");
         make_test_image(&img_path);
-        let (b64, _, _, _) = process_image(&img_path, None).unwrap();
-        let patch = build_patch(Some((&b64, 0.80)), None, 0.55, 0.25).unwrap();
+        let p = process_image(&img_path, None).unwrap();
+        let patch = build_patch(Some((&p.b64, 0.80, "image/jpeg")), None, 0.55, 0.25).unwrap();
         apply_patch(&root, Some(&patch)).unwrap();
         assert!(fs::read_to_string(&css_path).unwrap().contains(PATCH_START));
 
@@ -1745,6 +1922,7 @@ mod tests {
         let installed = install_hook(original).unwrap();
         assert!(installed.contains(HOT_HOOK_START));
         assert!(installed.contains(HOT_HOOK_END));
+        assert!(installed.contains(HOOK_VERSION_MARK), "新装探针应为 v2");
         assert!(installed.contains("setInterval(tick, 2000)"));
         assert!(
             installed.contains("fetch('/kimi-wallpaper-hot.json"),
@@ -1791,7 +1969,7 @@ mod tests {
         };
 
         // 首次写入：旧 v 视为 0，新 v = max(1, now_ms) = now_ms
-        write_hot_files(&dist, "cssA").unwrap();
+        write_hot_files(&dist, "cssA", None).unwrap();
         assert_eq!(fs::read_to_string(hot_css_path(&dist)).unwrap(), "cssA");
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1803,12 +1981,12 @@ mod tests {
 
         // 手写旧大版本 -> 新 v = 旧v+1（旧v+1 > now_ms，取旧v+1 分支）
         fs::write(hot_json_path(&dist), r#"{"v":99999999999999}"#).unwrap();
-        write_hot_files(&dist, "cssB").unwrap();
+        write_hot_files(&dist, "cssB", None).unwrap();
         assert_eq!(fs::read_to_string(hot_css_path(&dist)).unwrap(), "cssB");
         assert_eq!(read_v(), 100000000000000, "应取 旧v+1");
 
         // 空 css 也写入，v 继续递增
-        write_hot_files(&dist, "").unwrap();
+        write_hot_files(&dist, "", None).unwrap();
         assert_eq!(fs::read_to_string(hot_css_path(&dist)).unwrap(), "");
         assert_eq!(read_v(), 100000000000001, "空 css 后 v 应继续 +1");
     }
@@ -1869,27 +2047,25 @@ mod tests {
         let img_path = dir.join("src.png");
         make_test_image(&img_path); // 32×32
 
-        let (_, _, _, cropped) =
-            process_image(&img_path, Some(CropRect { x: 0.25, y: 0.25, w: 0.5, h: 0.5 })).unwrap();
-        assert_eq!(cropped, Some((16, 16)), "应裁剪为中央 16×16");
+        let p = process_image(&img_path, Some(CropRect { x: 0.25, y: 0.25, w: 0.5, h: 0.5 })).unwrap();
+        assert_eq!(p.cropped, Some((16, 16)), "应裁剪为中央 16×16");
+        assert_eq!(p.mime, "image/jpeg");
 
-        let (b64, _, _, cropped) =
-            process_image(&img_path, Some(CropRect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 })).unwrap();
-        assert_eq!(cropped, Some((32, 32)), "全图裁剪等于原尺寸");
-        assert!(!b64.is_empty());
+        let p_full = process_image(&img_path, Some(CropRect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 })).unwrap();
+        assert_eq!(p_full.cropped, Some((32, 32)), "全图裁剪等于原尺寸");
+        assert!(!p_full.b64.is_empty());
 
-        let (b64_full, _, _, cropped) = process_image(&img_path, None).unwrap();
-        assert!(cropped.is_none());
-        assert!(!b64_full.is_empty());
+        let p_none = process_image(&img_path, None).unwrap();
+        assert!(p_none.cropped.is_none());
+        assert!(!p_none.b64.is_empty());
 
         // 越界选区应被 clamp，不 panic
-        let (b64_clamped, _, _, cropped) =
-            process_image(&img_path, Some(CropRect { x: 0.9, y: 0.9, w: 0.5, h: 0.5 })).unwrap();
-        assert!(cropped.is_some());
-        let (w, h) = cropped.unwrap();
+        let p_clamped = process_image(&img_path, Some(CropRect { x: 0.9, y: 0.9, w: 0.5, h: 0.5 })).unwrap();
+        assert!(p_clamped.cropped.is_some());
+        let (w, h) = p_clamped.cropped.unwrap();
         assert!(w >= 1 && h >= 1);
         assert!(w <= 32 && h <= 32);
-        assert!(!b64_clamped.is_empty());
+        assert!(!p_clamped.b64.is_empty());
     }
 
     #[test]
@@ -1904,6 +2080,7 @@ mod tests {
             light_path: None,
             light_alpha: 0.78,
             light_crop: None,
+            video_path: None,
         };
         let back = SettingsSnapshot::from_conf(&s.to_conf());
         assert_eq!(back, s, "含 crop 的完整快照应 round-trip（含中文/空格/= 路径）");
@@ -1921,10 +2098,12 @@ mod tests {
             light_path: Some(PathBuf::from("E:\\light.jpg")),
             light_alpha: 0.70,
             light_crop: Some(CropRect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 }),
+            video_path: Some(PathBuf::from("F:\\视频\\bg.mp4")),
         };
         let back = SettingsSnapshot::from_conf(&s.to_conf());
         assert_eq!(back.dark_path, s.dark_path);
         assert_eq!(back.light_path, s.light_path);
+        assert_eq!(back.video_path, s.video_path, "视频路径（含中文）应 round-trip");
         assert!(back.dark_crop.is_none());
         assert_eq!(back.light_crop, s.light_crop);
         assert!((back.side_alpha - 0.30).abs() < 1e-6);
@@ -1957,5 +2136,121 @@ light.crop=,,
         assert_eq!(s.dark_path, None, "空 path 应为 None");
         assert_eq!(s.light_crop, None);
         assert!((s.light_alpha - 0.78).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_gif_passthrough() {
+        use base64::Engine as _;
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("test-fixture").join("gif-passthrough");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let gif_path = dir.join("anim.gif");
+        // 假 GIF 头即可：process_image 对 .gif 不应尝试解码
+        let bytes = b"GIF89a\x10\x00\x10\x00\x91\x00\x00";
+        fs::write(&gif_path, bytes).unwrap();
+
+        let p = process_image(&gif_path, None).unwrap();
+        assert_eq!(p.mime, "image/gif");
+        assert_eq!(p.orig_len, bytes.len());
+        assert_eq!(p.comp_len, bytes.len(), "GIF 不压缩，comp_len 应等于原始大小");
+        assert!(p.cropped.is_none());
+        let expect = base64::engine::general_purpose::STANDARD.encode(bytes);
+        assert_eq!(p.b64, expect, "GIF 应原样 base64 透传（保留动画）");
+
+        // GIF 带 crop：忽略裁剪，仍整图透传
+        let p2 = process_image(&gif_path, Some(CropRect { x: 0.0, y: 0.0, w: 0.5, h: 0.5 })).unwrap();
+        assert_eq!(p2.mime, "image/gif");
+        assert!(p2.cropped.is_none(), "GIF 应忽略裁剪");
+        assert_eq!(p2.b64, expect);
+    }
+
+    #[test]
+    fn test_build_patch_mime_placeholder() {
+        let gif_patch = build_patch(Some(("QUJD", 0.80, "image/gif")), None, 0.55, 0.25).unwrap();
+        assert!(
+            gif_patch.contains("data:image/gif;base64,QUJD"),
+            "GIF 槽应输出 data:image/gif"
+        );
+        assert!(!gif_patch.contains("data:image/jpeg;base64,QUJD"));
+
+        let jpg_patch = build_patch(Some(("QUJD", 0.80, "image/jpeg")), None, 0.55, 0.25).unwrap();
+        assert!(jpg_patch.contains("data:image/jpeg;base64,QUJD"));
+        assert!(!jpg_patch.contains("{MIME}"), "{{MIME}} 占位符应被全部替换");
+    }
+
+    #[test]
+    fn test_templates_define_mask_variable() {
+        let patch = build_patch(
+            Some(("d", 0.80, "image/jpeg")),
+            Some(("l", 0.78, "image/jpeg")),
+            0.55,
+            0.25,
+        )
+        .unwrap();
+        assert_eq!(patch.matches("--kimi-wallpaper-mask").count(), 4, "dark/light × scheme/system 共 4 条遮罩变量规则");
+        assert!(patch.contains("html[data-color-scheme=dark]{--kimi-wallpaper-mask:rgba(7,7,13,0.80)"));
+        assert!(patch.contains("html[data-color-scheme=system]{--kimi-wallpaper-mask:rgba(7,7,13,0.80)"));
+        assert!(patch.contains("html[data-color-scheme=light]{--kimi-wallpaper-mask:rgba(250,250,252,0.78)"));
+        assert!(patch.contains("html[data-color-scheme=system]{--kimi-wallpaper-mask:rgba(250,250,252,0.78)}"));
+    }
+
+    #[test]
+    fn test_write_hot_files_video_field() {
+        let dist = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("test-fixture")
+            .join("hot-files-video");
+        let _ = fs::remove_dir_all(&dist);
+        fs::create_dir_all(&dist).unwrap();
+
+        // 带视频字段
+        write_hot_files(&dist, "cssA", Some(VIDEO_FILE_NAME)).unwrap();
+        let j = fs::read_to_string(hot_json_path(&dist)).unwrap();
+        assert!(j.starts_with('{') && j.ends_with('}'));
+        assert!(j.contains(&format!("\"video\":\"{VIDEO_FILE_NAME}\"")), "应写入 video 文件名: {j}");
+
+        // 不带视频 -> null
+        write_hot_files(&dist, "cssB", None).unwrap();
+        let j2 = fs::read_to_string(hot_json_path(&dist)).unwrap();
+        assert!(j2.contains("\"video\":null"), "无视频时应写 video:null: {j2}");
+        assert_eq!(fs::read_to_string(hot_css_path(&dist)).unwrap(), "cssB");
+
+        // 旧格式 json（无 video 字段）版本号解析仍有效（用大版本号避开 now_ms 取大分支）
+        fs::write(hot_json_path(&dist), r#"{"v":99999999999998}"#).unwrap();
+        write_hot_files(&dist, "cssC", None).unwrap();
+        let j3 = fs::read_to_string(hot_json_path(&dist)).unwrap();
+        let re = regex::Regex::new(r#""v"\s*:\s*(\d+)"#).unwrap();
+        let v: u64 = re.captures(&j3).unwrap()[1].parse().unwrap();
+        assert_eq!(v, 99999999999999, "旧格式（无 video 字段）的 v 应继续 +1");
+        assert!(j3.contains("\"video\":null"));
+    }
+
+    #[test]
+    fn test_install_hook_v2_upgrade() {
+        // 手工拼一个 v1 块（= v2 块去掉版本注释行）
+        let v1_block = HOT_HOOK_BLOCK
+            .replace("    <!-- version: v2 -->\n", "")
+            .to_string();
+        assert!(!v1_block.contains(HOOK_VERSION_MARK));
+        let original = "<html><body>\n</body></html>";
+        let with_v1 = format!("<html><body>\n{v1_block}\n</body></html>");
+
+        assert!(hook_installed(&with_v1));
+        assert!(hook_needs_upgrade(&with_v1), "v1 块应被判定需升级");
+
+        // 升级：v1 -> v2，只保留一段探针
+        let upgraded = install_hook(&with_v1).unwrap();
+        assert!(upgraded.contains(HOOK_VERSION_MARK), "升级后应为 v2");
+        assert!(!hook_needs_upgrade(&upgraded));
+        assert_eq!(upgraded.matches(HOT_HOOK_START).count(), 1, "升级后只应有一段探针块");
+        assert_eq!(upgraded.matches("kimi-wallpaper-hot-hook").count(), 2);
+        assert!(upgraded.contains("kimi-wallpaper-hot-video"), "v2 探针应含视频层");
+
+        // v2 再 install 幂等
+        let again = install_hook(&upgraded).unwrap();
+        assert_eq!(again, upgraded, "已是最新 v2 时应原样返回");
+
+        // remove 对 v2 精确还原
+        assert_eq!(remove_hook(&upgraded), original, "卸载 v2 应精确还原");
+        assert!(!hook_installed(&remove_hook(&upgraded)));
     }
 }

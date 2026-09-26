@@ -1865,6 +1865,8 @@ fn card(ui: &mut egui::Ui, title: &str, add_contents: impl FnOnce(&mut egui::Ui)
         .corner_radius(egui::CornerRadius::same(10))
         .inner_margin(egui::Margin::same(12))
         .show(ui, |ui| {
+            let w = ui.available_width();
+            ui.set_min_width(w);
             ui.label(egui::RichText::new(title).size(14.0).strong());
             ui.add_space(6.0);
             add_contents(ui);

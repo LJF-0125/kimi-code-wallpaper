@@ -28,6 +28,7 @@ cargo test --release     # 全部测试必须通过
 - v2 探针维护两层：`<video>` 背景层（z-index:-2，muted/loop/autoplay/playsInline，object-fit:cover）+ 独立遮罩 `<div>`（z-index:-1，`background:var(--kimi-wallpaper-mask,transparent)`，该 CSS 变量由补丁按 dark/light/system 定义，遮罩随主题自动切换，探针不感知主题）
 - 热更文件：`kimi-wallpaper-hot.css`（=补丁全文）+ `kimi-wallpaper-hot.json`（`{"v":N,"video":"kimi-wallpaper-video.mp4"|null}`）。**必须先写 css 后写 json**，版本号 `max(旧+1, unix毫秒)`，探针以 json 为准；video 字段驱动视频层挂载/移除
 - 视频文件不内嵌：应用时拷贝到 `desktop-dist\kimi-wallpaper-video.mp4` 固定名，探针以 `/kimi-wallpaper-video.mp4` 绝对路径引用（app:// 同目录可读）
+- **app:// 协议处理器不支持 Range 请求**（已解包主进程 `protocol-*.cjs` 源码确认：整文件流式返回、无 206/Content-Range），MP4 必须 faststart（moov 在文件头），否则视频卡死在第一帧。工具部署时自动检测（`mp4_moov_before_mdat`），非 faststart 自动重封装（`faststart_remux`，纯搬盒子不转码：moov 移到 mdat 前 + stco/co64 chunk 偏移按 mdat 位移修正），检测/重封装失败回退原样拷贝并提示 `ffmpeg -movflags faststart`
 - 探针 fetch **必须用绝对路径** `/kimi-wallpaper-hot.*`——相对路径在 `/sessions/<id>` 路由下会 404 静默失效（踩过的坑）
 - 升级检测：`hook_needs_upgrade` = 含起始标记但缺 `HOOK_VERSION_MARK`（v1 旧块）。`install_hook` 幂等策略：未安装→插入；v1→remove 旧块再插 v2；已 v2→原样返回。UI 三态：v2 绿「已启用 v2」/ v1 黄「需升级」（按钮「升级热更新」）/ 未装「未启用」
 - Kimi Code 应用更新会冲掉 index.html（探针）和 main-*.css（补丁），热更文件可能幸存但成孤儿。更新后的恢复流程见 `T:\KCD BackGrond\热更新探针-档案与恢复指南.md`

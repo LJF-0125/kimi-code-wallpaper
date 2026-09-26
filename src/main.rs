@@ -624,6 +624,51 @@ impl BgToolApp {
         }
     }
 
+    /// 部署视频：检测 moov 位置，非 faststart 自动重封装（不转码）后写入 dest；
+    /// 检测/重封装失败回退原样拷贝并日志提示。成功返回 Some(VIDEO_FILE_NAME)。
+    fn deploy_video(&mut self, src: &Path, dest: &Path) -> Option<String> {
+        let data = match fs::read(src) {
+            Ok(d) => d,
+            Err(e) => {
+                self.log_push(&format!("视频部署失败: 读取 {} 失败: {e}", src.display()));
+                return None;
+            }
+        };
+        let mut remuxed = false;
+        let out = match mp4_moov_before_mdat(&data) {
+            Ok(true) => data,
+            Ok(false) => match faststart_remux(&data) {
+                Ok(v) => {
+                    remuxed = true;
+                    v
+                }
+                Err(e) => {
+                    self.log_push(&format!(
+                        "faststart 重封装失败，已按原样部署；若背景卡住不动，请用 ffmpeg -movflags faststart 转一下: {e:#}"
+                    ));
+                    data
+                }
+            },
+            Err(e) => {
+                self.log_push(&format!(
+                    "faststart 检测失败，已按原样部署；若背景卡住不动，请用 ffmpeg -movflags faststart 转一下: {e:#}"
+                ));
+                data
+            }
+        };
+        let mb = out.len() as f64 / 1024.0 / 1024.0;
+        if let Err(e) = fs::write(dest, &out) {
+            self.log_push(&format!("视频部署失败: 写入 {} 失败: {e}", dest.display()));
+            return None;
+        }
+        self.log_push(&format!("视频已部署: {mb:.1} MB"));
+        if remuxed {
+            self.log_push("视频 moov 在文件尾，已自动重封装为 faststart（不转码，画质无损）");
+        }
+        self.log_push("警告: 视频背景持续解码播放，会增加耗电（笔记本用电池时更明显）");
+        Some(VIDEO_FILE_NAME.to_string())
+    }
+
     fn do_apply(&mut self) {
         let root = match self.root.clone() {
             Some(r) => r,
@@ -653,19 +698,13 @@ impl BgToolApp {
         if let Some(p) = &light {
             self.log_processed("浅色图", p, self.light.crop.is_some());
         }
-        // 视频部署：拷贝到 desktop-dist 固定名，探针以 /kimi-wallpaper-video.mp4 引用
-        let video_name = match &self.video_path {
-            Some(src) => match fs::copy(src, dist.join(VIDEO_FILE_NAME)) {
-                Ok(n) => {
-                    self.log_push(&format!("视频已部署: {:.1} MB", n as f64 / 1024.0 / 1024.0));
-                    self.log_push("警告: 视频背景持续解码播放，会增加耗电（笔记本用电池时更明显）");
-                    Some(VIDEO_FILE_NAME.to_string())
-                }
-                Err(e) => {
-                    self.log_push(&format!("视频部署失败: {e:#}"));
-                    None
-                }
-            },
+        // 视频部署：app:// 协议不支持 Range 请求，MP4 必须 faststart（moov 在文件头），
+        // 非 faststart 自动重封装（纯搬盒子、不转码）后再写入 desktop-dist 固定名
+        let video_name = match self.video_path.clone() {
+            Some(src) => {
+                let dest = dist.join(VIDEO_FILE_NAME);
+                self.deploy_video(&src, &dest)
+            }
             None => {
                 let dest = dist.join(VIDEO_FILE_NAME);
                 if dest.exists() {
@@ -1353,6 +1392,197 @@ fn remove_hook(index_html_content: &str) -> String {
     let rest = index_html_content[end..].strip_prefix('\n').unwrap_or(&index_html_content[end..]);
     out.push_str(rest);
     out
+}
+
+// ---------- MP4 faststart ----------
+
+/// MP4 容器 box 类型（嵌套子 box；其余视为叶子）。
+const MP4_CONTAINERS: [[u8; 4]; 8] = [
+    *b"moov", *b"trak", *b"mdia", *b"minf", *b"stbl", *b"edts", *b"udta", *b"dinf",
+];
+
+/// 解析顶层 box 序列：每个 box 为 4 字节大端 size + 4 字节 type；
+/// size==1 时紧跟 8 字节 largesize；size==0 表示到文件尾。
+/// 返回 (type, 起始偏移, 总大小含头)。
+fn parse_top_boxes(data: &[u8]) -> anyhow::Result<Vec<([u8; 4], usize, u64)>> {
+    let mut out = Vec::new();
+    let mut pos = 0usize;
+    while pos < data.len() {
+        let head = data
+            .get(pos..pos + 8)
+            .ok_or_else(|| anyhow!("MP4 顶层 box 头部不完整（偏移 {pos}）"))?;
+        let size32 = u32::from_be_bytes(head[0..4].try_into().unwrap());
+        let typ: [u8; 4] = head[4..8].try_into().unwrap();
+        let (header, size) = match size32 {
+            1 => {
+                let ext = data
+                    .get(pos + 8..pos + 16)
+                    .ok_or_else(|| anyhow!("MP4 largesize box 头部不完整（偏移 {pos}）"))?;
+                (16u64, u64::from_be_bytes(ext.try_into().unwrap()))
+            }
+            0 => (8u64, data.len() as u64 - pos as u64),
+            s => (8u64, s as u64),
+        };
+        if size < header {
+            bail!("MP4 box {:?} size 非法: {size} < 头 {header}", String::from_utf8_lossy(&typ));
+        }
+        let end = pos as u64 + size;
+        if end > data.len() as u64 {
+            bail!(
+                "MP4 box {:?} 越界: 结束 {end} > 文件长度 {}",
+                String::from_utf8_lossy(&typ),
+                data.len()
+            );
+        }
+        out.push((typ, pos, size));
+        pos = end as usize;
+    }
+    Ok(out)
+}
+
+/// moov 是否在 mdat 之前（faststart 判定）。找不到任一个则 Err。
+fn mp4_moov_before_mdat(data: &[u8]) -> anyhow::Result<bool> {
+    let boxes = parse_top_boxes(data)?;
+    let moov = boxes
+        .iter()
+        .find(|b| b.0 == *b"moov")
+        .map(|b| b.1)
+        .ok_or_else(|| anyhow!("未找到 moov box（可能不是 MP4）"))?;
+    let mdat = boxes
+        .iter()
+        .find(|b| b.0 == *b"mdat")
+        .map(|b| b.1)
+        .ok_or_else(|| anyhow!("未找到 mdat box（可能不是 MP4）"))?;
+    Ok(moov < mdat)
+}
+
+/// 修正单个 stco/co64 box 的 chunk 偏移。body 含 8 字节 box 头，
+/// 其后 version/flags 4 字节 + entry_count 4 字节 + N 个 u32/u64 大端 entry。
+fn fix_chunk_offsets(body: &mut [u8], delta: i64, wide: bool) -> anyhow::Result<()> {
+    let esz = if wide { 8usize } else { 4 };
+    if body.len() < 16 {
+        bail!("stco/co64 box 过短: {} 字节", body.len());
+    }
+    let entry_count = u32::from_be_bytes(body[12..16].try_into().unwrap()) as usize;
+    let need = entry_count
+        .checked_mul(esz)
+        .and_then(|n| n.checked_add(16))
+        .ok_or_else(|| anyhow!("stco/co64 entry_count 非法"))?;
+    if body.len() < need {
+        bail!(
+            "stco/co64 entry 越界: 声明 {entry_count} 条需 {need} 字节，实际 {} 字节",
+            body.len()
+        );
+    }
+    for i in 0..entry_count {
+        let off = 16 + i * esz;
+        if wide {
+            let v = u64::from_be_bytes(body[off..off + 8].try_into().unwrap());
+            let nv = (v as i64)
+                .checked_add(delta)
+                .ok_or_else(|| anyhow!("co64 chunk 偏移 {v} 加 delta {delta} 溢出"))?;
+            if nv < 0 {
+                bail!("co64 chunk 偏移 {v} 加 delta {delta} 为负");
+            }
+            body[off..off + 8].copy_from_slice(&(nv as u64).to_be_bytes());
+        } else {
+            let v = u32::from_be_bytes(body[off..off + 4].try_into().unwrap());
+            let nv = (v as i64)
+                .checked_add(delta)
+                .ok_or_else(|| anyhow!("stco chunk 偏移 {v} 加 delta {delta} 溢出"))?;
+            if !(0..=u32::MAX as i64).contains(&nv) {
+                bail!("stco chunk 偏移 {v} 加 delta {delta} 越界");
+            }
+            body[off..off + 4].copy_from_slice(&(nv as u32).to_be_bytes());
+        }
+    }
+    Ok(())
+}
+
+/// 递归修正 moov 子树里的 stco/co64：容器 box 进树，叶子 stco/co64 修偏移。
+fn fix_moov_tree(region: &mut [u8], delta: i64) -> anyhow::Result<()> {
+    let mut pos = 0usize;
+    while pos + 8 <= region.len() {
+        let size32 = u32::from_be_bytes(region[pos..pos + 4].try_into().unwrap());
+        let typ: [u8; 4] = region[pos + 4..pos + 8].try_into().unwrap();
+        let (header, size) = match size32 {
+            1 => {
+                if pos + 16 > region.len() {
+                    bail!("moov 内嵌 largesize box 头部不完整（偏移 {pos}）");
+                }
+                let ext: [u8; 8] = region[pos + 8..pos + 16].try_into().unwrap();
+                (16usize, u64::from_be_bytes(ext))
+            }
+            0 => (8usize, region.len() as u64 - pos as u64),
+            s => (8usize, s as u64),
+        };
+        if size < header as u64 || pos as u64 + size > region.len() as u64 {
+            bail!(
+                "moov 内嵌 box {:?} 大小非法（偏移 {pos}）",
+                String::from_utf8_lossy(&typ)
+            );
+        }
+        let size = size as usize;
+        let body = &mut region[pos..pos + size];
+        if typ == *b"stco" {
+            fix_chunk_offsets(body, delta, false)?;
+        } else if typ == *b"co64" {
+            fix_chunk_offsets(body, delta, true)?;
+        } else if MP4_CONTAINERS.contains(&typ) {
+            fix_moov_tree(&mut body[header..], delta)?;
+        }
+        pos += size;
+    }
+    Ok(())
+}
+
+/// 重封装为 faststart 布局：[mdat 之前的非 moov boxes] + moov + mdat + [其余 boxes]，
+/// 各 box 原始字节不变；moov 内的 stco/co64 chunk 偏移按 mdat 位移量修正（delta 可正可负）。
+/// moov 已在 mdat 前则直接返回原数据拷贝。
+fn faststart_remux(data: &[u8]) -> anyhow::Result<Vec<u8>> {
+    let boxes = parse_top_boxes(data)?;
+    let moov = boxes
+        .iter()
+        .find(|b| b.0 == *b"moov")
+        .ok_or_else(|| anyhow!("未找到 moov box"))?;
+    let mdat = boxes
+        .iter()
+        .find(|b| b.0 == *b"mdat")
+        .ok_or_else(|| anyhow!("未找到 mdat box"))?;
+    if moov.1 < mdat.1 {
+        return Ok(data.to_vec());
+    }
+    // mdat 新起始偏移 = 原 mdat 之前所有 box 的字节和（moov 在其后，天然不含）+ moov 大小
+    let mdat_new_off: u64 = boxes
+        .iter()
+        .filter(|b| b.1 < mdat.1)
+        .map(|b| b.2)
+        .sum::<u64>()
+        + moov.2;
+    let delta = mdat_new_off as i64 - mdat.1 as i64;
+    // 修正 moov 副本内的 chunk 偏移
+    let mut moov_bytes = data[moov.1..moov.1 + moov.2 as usize].to_vec();
+    let moov_header = if u32::from_be_bytes(moov_bytes[0..4].try_into().unwrap()) == 1 {
+        16usize
+    } else {
+        8usize
+    };
+    fix_moov_tree(&mut moov_bytes[moov_header..], delta)?;
+    // 组装新布局：[mdat 之前的 boxes] + moov + mdat + [其余 boxes]
+    let mut out = Vec::with_capacity(data.len());
+    for b in &boxes {
+        if b.1 < mdat.1 {
+            out.extend_from_slice(&data[b.1..b.1 + b.2 as usize]);
+        }
+    }
+    out.extend_from_slice(&moov_bytes);
+    out.extend_from_slice(&data[mdat.1..mdat.1 + mdat.2 as usize]);
+    for b in &boxes {
+        if b.1 > mdat.1 && b.0 != *b"moov" {
+            out.extend_from_slice(&data[b.1..b.1 + b.2 as usize]);
+        }
+    }
+    Ok(out)
 }
 
 // ---------- 图片处理 ----------
@@ -2252,5 +2482,156 @@ light.crop=,,
         // remove 对 v2 精确还原
         assert_eq!(remove_hook(&upgraded), original, "卸载 v2 应精确还原");
         assert!(!hook_installed(&remove_hook(&upgraded)));
+    }
+
+    /// 造一个完整 box：4 字节大端 size + 4 字节 type + payload。
+    fn bx(typ: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let mut v = Vec::with_capacity(8 + payload.len());
+        v.extend_from_slice(&((payload.len() as u32 + 8).to_be_bytes()));
+        v.extend_from_slice(typ);
+        v.extend_from_slice(payload);
+        v
+    }
+
+    /// 造 moov>trak>mdia>minf>stbl>stco/co64 嵌套结构，entries 为 chunk 偏移。
+    fn toy_moov(wide: bool, entries: &[u64]) -> Vec<u8> {
+        let mut stco_payload = vec![0u8; 4]; // version/flags
+        stco_payload.extend_from_slice(&(entries.len() as u32).to_be_bytes());
+        for &e in entries {
+            if wide {
+                stco_payload.extend_from_slice(&e.to_be_bytes());
+            } else {
+                stco_payload.extend_from_slice(&(e as u32).to_be_bytes());
+            }
+        }
+        let leaf_typ: &[u8; 4] = if wide { b"co64" } else { b"stco" };
+        let stbl = bx(b"stbl", &bx(leaf_typ, &stco_payload));
+        let minf = bx(b"minf", &stbl);
+        let mdia = bx(b"mdia", &minf);
+        let trak = bx(b"trak", &mdia);
+        bx(b"moov", &trak)
+    }
+
+    fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
+        hay.windows(needle.len()).position(|w| w == needle)
+    }
+
+    /// 从 mp4 数据里抽 stco/co64 的 entries（假定唯一）。
+    /// pos 指向 type 字段，其后为 version/flags(4) + entry_count(4) + entries。
+    fn read_chunk_entries(mp4: &[u8], wide: bool) -> Vec<u64> {
+        let typ: &[u8; 4] = if wide { b"co64" } else { b"stco" };
+        let pos = find_subslice(mp4, typ).expect("应找到 stco/co64 box");
+        let count = u32::from_be_bytes(mp4[pos + 8..pos + 12].try_into().unwrap()) as usize;
+        let esz = if wide { 8 } else { 4 };
+        (0..count)
+            .map(|i| {
+                let off = pos + 12 + i * esz;
+                if wide {
+                    u64::from_be_bytes(mp4[off..off + 8].try_into().unwrap())
+                } else {
+                    u32::from_be_bytes(mp4[off..off + 4].try_into().unwrap()) as u64
+                }
+            })
+            .collect()
+    }
+
+    /// 抽 mdat 的 payload 字节。
+    fn read_mdat_payload(mp4: &[u8]) -> Vec<u8> {
+        let pos = find_subslice(mp4, b"mdat").expect("应找到 mdat box");
+        let size = u32::from_be_bytes(mp4[pos - 4..pos].try_into().unwrap()) as usize;
+        mp4[pos + 4..pos - 4 + size].to_vec()
+    }
+
+    #[test]
+    fn test_mp4_moov_before_mdat() {
+        let ftyp = bx(b"ftyp", b"isom0000");
+        let moov = toy_moov(false, &[1000, 2000]);
+        let mdat = bx(b"mdat", &[0xABu8; 64]);
+
+        // faststart 布局：moov 在 mdat 前
+        let mut good = ftyp.clone();
+        good.extend_from_slice(&moov);
+        good.extend_from_slice(&mdat);
+        assert!(mp4_moov_before_mdat(&good).unwrap(), "moov 在 mdat 前应判 true");
+        assert_eq!(
+            faststart_remux(&good).unwrap(),
+            good,
+            "已 faststart 的输入应原样返回"
+        );
+
+        // moov 在文件尾
+        let mut bad = ftyp.clone();
+        bad.extend_from_slice(&mdat);
+        bad.extend_from_slice(&moov);
+        assert!(!mp4_moov_before_mdat(&bad).unwrap(), "moov 在 mdat 后应判 false");
+
+        // 缺 moov / 缺 mdat / 垃圾数据 均报错
+        let mut no_moov = ftyp.clone();
+        no_moov.extend_from_slice(&mdat);
+        assert!(mp4_moov_before_mdat(&no_moov).is_err());
+        let mut no_mdat = ftyp.clone();
+        no_mdat.extend_from_slice(&moov);
+        assert!(mp4_moov_before_mdat(&no_mdat).is_err());
+        assert!(mp4_moov_before_mdat(b"this is definitely not an mp4 file at all").is_err());
+    }
+
+    #[test]
+    fn test_faststart_remux_stco() {
+        let ftyp = bx(b"ftyp", b"isom0000"); // 16 字节
+        let moov = toy_moov(false, &[1000, 2000]);
+        let mdat_payload = [0xCDu8; 64];
+        let mdat = bx(b"mdat", &mdat_payload); // 72 字节，紧随 ftyp
+        let mdat_old_off = ftyp.len() as i64; // 16
+        let delta = (ftyp.len() as i64 + moov.len() as i64) - mdat_old_off;
+
+        let mut src = ftyp.clone();
+        src.extend_from_slice(&mdat);
+        src.extend_from_slice(&moov);
+
+        let out = faststart_remux(&src).unwrap();
+        assert!(mp4_moov_before_mdat(&out).unwrap(), "重封装后 moov 应在 mdat 前");
+        // 布局 = ftyp + moov + mdat
+        assert_eq!(out.len(), src.len());
+        assert_eq!(&out[..ftyp.len()], &ftyp[..]);
+        assert_eq!(
+            read_chunk_entries(&out, false),
+            vec![(1000 + delta) as u32 as u64, (2000 + delta) as u32 as u64],
+            "stco entry 应加上 mdat 位移 delta={delta}"
+        );
+        assert_eq!(
+            read_mdat_payload(&out),
+            mdat_payload.to_vec(),
+            "mdat 内容应逐字节不变"
+        );
+        // 幂等：再跑一次应原样返回
+        assert_eq!(faststart_remux(&out).unwrap(), out, "重封装应幂等");
+    }
+
+    #[test]
+    fn test_faststart_remux_co64() {
+        let ftyp = bx(b"ftyp", b"isom0000"); // 16 字节
+        let moov = toy_moov(true, &[50_000, 90_000, 130_000]);
+        let mdat_payload = [0x77u8; 48];
+        let mdat = bx(b"mdat", &mdat_payload);
+        let mdat_old_off = ftyp.len() as i64;
+        let delta = (ftyp.len() as i64 + moov.len() as i64) - mdat_old_off;
+
+        let mut src = ftyp.clone();
+        src.extend_from_slice(&mdat);
+        src.extend_from_slice(&moov);
+
+        let out = faststart_remux(&src).unwrap();
+        assert!(mp4_moov_before_mdat(&out).unwrap());
+        assert_eq!(
+            read_chunk_entries(&out, true),
+            vec![
+                (50_000 + delta) as u64,
+                (90_000 + delta) as u64,
+                (130_000 + delta) as u64
+            ],
+            "co64 entry 应加上 mdat 位移 delta={delta}"
+        );
+        assert_eq!(read_mdat_payload(&out), mdat_payload.to_vec());
+        assert_eq!(faststart_remux(&out).unwrap(), out, "重封装应幂等");
     }
 }

@@ -750,6 +750,10 @@ impl BgToolApp {
         let video_name = match self.video_path.clone() {
             Some(src) => self.deploy_video(&src, &dist),
             None => {
+                // conf 丢失等场景下视频槽为空：若当前确有正在生效的视频背景，先醒目警告再清除
+                if let Some(warn) = removing_active_video_warning(&dist) {
+                    self.log_push(&warn);
+                }
                 if cleanup_old_video_files(&dist, None) {
                     self.log_push("旧视频文件暂被占用，下次应用时自动清理");
                 }
@@ -2083,6 +2087,14 @@ fn current_video_from_json(dist: &Path) -> Option<String> {
     let json = fs::read_to_string(hot_json_path(dist)).ok()?;
     let re = regex::Regex::new(r#""video"\s*:\s*"([^"]+)""#).ok()?;
     Some(re.captures(&json)?.get(1)?.as_str().to_string())
+}
+
+/// 视频槽为空但当前确有正在生效的视频背景时，返回醒目警告文案（文件不存在视为残留，不报）。
+fn removing_active_video_warning(dist: &Path) -> Option<String> {
+    let name = current_video_from_json(dist)?;
+    dist.join(&name).is_file().then(|| {
+        format!("注意: 视频槽为空，本次应用将移除当前视频背景（{name}）；如非本意请先点「选择视频」")
+    })
 }
 
 /// 惰性清理 desktop-dist 下的版本化视频文件（kimi-wallpaper-video*.mp4，含历史固定名），
@@ -3809,5 +3821,82 @@ light.crop=,,
         assert_eq!(mp4_track_handlers(&plain).unwrap(), vec![*b"vide"]);
         let d2 = deploy_video_file(&src2, &dist2).unwrap();
         assert!(d2.stripped.is_none(), "单视频轨不应触发剥除");
+    }
+
+    /// 测试用 BgToolApp：直接填字段，绕过 eframe 创建上下文（do_apply 只碰文件系统和自身状态）。
+    fn test_app(root: &Path) -> BgToolApp {
+        BgToolApp {
+            install_path: root.display().to_string(),
+            root: Some(root.to_path_buf()),
+            css_name: None,
+            patched: false,
+            bak_exists: false,
+            hot_enabled: false,
+            hot_needs_upgrade: false,
+            status_err: None,
+            dark: Slot::new(0.80),
+            light: Slot::new(0.78),
+            video_path: None,
+            side_alpha: 0.55,
+            panel_alpha: 0.25,
+            log: String::new(),
+            crop_editor: None,
+            saved_conf: String::new(),
+            pending_conf: None,
+            save_due: None,
+        }
+    }
+
+    #[test]
+    fn test_do_apply_warns_when_removing_active_video() {
+        let (root, _css) = make_fixture("warn-remove-video");
+        let dist = root.join("resources").join("desktop-dist");
+        // 预置热更 json（带 video 字段）+ 对应的已部署视频文件
+        fs::write(
+            dist.join("kimi-wallpaper-hot.json"),
+            r#"{"v":1,"video":"kimi-wallpaper-video-9.mp4"}"#,
+        )
+        .unwrap();
+        fs::write(dist.join("kimi-wallpaper-video-9.mp4"), b"fake video").unwrap();
+
+        let mut app = test_app(&root);
+        app.video_path = None;
+        app.do_apply();
+
+        assert!(
+            app.log.contains("注意: 视频槽为空，本次应用将移除当前视频背景（kimi-wallpaper-video-9.mp4）"),
+            "日志应含移除警告，实际日志:\n{}",
+            app.log
+        );
+        // 清除逻辑照旧执行：视频文件被删、json 的 video 置 null
+        assert!(!dist.join("kimi-wallpaper-video-9.mp4").exists());
+        let json = fs::read_to_string(dist.join("kimi-wallpaper-hot.json")).unwrap();
+        assert!(json.contains("\"video\":null"), "json 应清空 video: {json}");
+    }
+
+    #[test]
+    fn test_do_apply_no_warning_without_active_video() {
+        let (root, _css) = make_fixture("warn-no-video");
+        let dist = root.join("resources").join("desktop-dist");
+
+        // 场景 1：json video 为 null
+        fs::write(dist.join("kimi-wallpaper-hot.json"), r#"{"v":1,"video":null}"#).unwrap();
+        let mut app = test_app(&root);
+        app.do_apply();
+        assert!(!app.log.contains("注意: 视频槽为空"), "无视频不应警告:\n{}", app.log);
+
+        // 场景 2：json 残留 video 名但文件已不存在 → 视为残留不误报
+        fs::write(
+            dist.join("kimi-wallpaper-hot.json"),
+            r#"{"v":2,"video":"kimi-wallpaper-video-gone.mp4"}"#,
+        )
+        .unwrap();
+        let mut app = test_app(&root);
+        app.do_apply();
+        assert!(
+            !app.log.contains("注意: 视频槽为空"),
+            "文件缺失的残留不应警告:\n{}",
+            app.log
+        );
     }
 }

@@ -455,6 +455,7 @@ struct BgToolApp {
 
 impl BgToolApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        setup_theme(&cc.egui_ctx);
         let mut app = Self {
             install_path: String::new(),
             root: None,
@@ -1821,30 +1822,121 @@ fn load_preview(ctx: &egui::Context, path: &Path, max_side: u32) -> anyhow::Resu
 
 // ---------- UI ----------
 
-fn slot_ui(ui: &mut egui::Ui, title: &str, slot: &mut Slot, ctx: &egui::Context, log: &mut String) -> bool {
-    let mut crop_requested = false;
-    ui.group(|ui| {
-        ui.label(egui::RichText::new(title).strong());
-        let size = egui::vec2(230.0, 132.0);
-        if let Some(tex) = &slot.texture {
-            ui.image((tex.id(), size));
-        } else {
-            let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
-            ui.painter().rect_filled(
-                rect,
-                4.0,
-                egui::Color32::from_gray(28),
+// 卡片式设置页设计 token（提取自 Kimi_pet_engine 设置页风格）
+const C_BG: egui::Color32 = egui::Color32::from_rgb(0xf6, 0xf7, 0xf9);
+const C_CARD: egui::Color32 = egui::Color32::WHITE;
+const C_BORDER: egui::Color32 = egui::Color32::from_rgb(0xe5, 0xe6, 0xea);
+const C_TEXT: egui::Color32 = egui::Color32::from_rgb(0x33, 0x33, 0x33);
+const C_MUTED: egui::Color32 = egui::Color32::from_rgb(0x88, 0x88, 0x88);
+const C_ACCENT: egui::Color32 = egui::Color32::from_rgb(0x4a, 0x7d, 0xdb);
+const C_GOOD: egui::Color32 = egui::Color32::from_rgb(0x3a, 0xa5, 0x4a);
+const C_WARN: egui::Color32 = egui::Color32::from_rgb(0xc0, 0x5a, 0x1e);
+const C_BTN_HOVER: egui::Color32 = egui::Color32::from_rgb(0xf0, 0xf1, 0xf4);
+
+/// 强制浅色主题，把设计 token 应用到 egui visuals。
+fn setup_theme(ctx: &egui::Context) {
+    let mut v = egui::Visuals::light();
+    v.panel_fill = C_BG;
+    v.window_fill = C_BG;
+    v.extreme_bg_color = egui::Color32::WHITE;
+    v.override_text_color = Some(C_TEXT);
+    v.selection.bg_fill = C_ACCENT;
+    v.hyperlink_color = C_ACCENT;
+    let radius = egui::CornerRadius::same(8);
+    v.widgets.noninteractive.corner_radius = radius;
+    v.widgets.inactive.corner_radius = radius;
+    v.widgets.hovered.corner_radius = radius;
+    v.widgets.active.corner_radius = radius;
+    v.widgets.open.corner_radius = radius;
+    v.widgets.inactive.weak_bg_fill = egui::Color32::WHITE;
+    v.widgets.hovered.weak_bg_fill = C_BTN_HOVER;
+    v.widgets.active.weak_bg_fill = C_BTN_HOVER;
+    v.widgets.inactive.bg_stroke = egui::Stroke::new(1.0_f32, C_BORDER);
+    v.widgets.hovered.bg_stroke = egui::Stroke::new(1.0_f32, C_BORDER);
+    v.widgets.active.bg_stroke = egui::Stroke::new(1.0_f32, C_ACCENT);
+    ctx.set_visuals(v);
+}
+
+/// 卡片容器：白底、1px 边框、圆角 10、内边距 12。
+fn card(ui: &mut egui::Ui, title: &str, add_contents: impl FnOnce(&mut egui::Ui)) {
+    egui::Frame::new()
+        .fill(C_CARD)
+        .stroke(egui::Stroke::new(1.0_f32, C_BORDER))
+        .corner_radius(egui::CornerRadius::same(10))
+        .inner_margin(egui::Margin::same(12))
+        .show(ui, |ui| {
+            ui.label(egui::RichText::new(title).size(14.0).strong());
+            ui.add_space(6.0);
+            add_contents(ui);
+        });
+}
+
+/// 16px 灰白相间棋盘格，作图片预览区的透明底。
+fn checkerboard(painter: &egui::Painter, rect: egui::Rect) {
+    let light = egui::Color32::from_gray(245);
+    let dark = egui::Color32::from_gray(220);
+    let cell: f32 = 16.0;
+    let mut y = rect.top();
+    let mut row = 0usize;
+    while y < rect.bottom() {
+        let h = cell.min(rect.bottom() - y);
+        let mut x = rect.left();
+        let mut col = 0usize;
+        while x < rect.right() {
+            let w = cell.min(rect.right() - x);
+            let color = if (row + col) % 2 == 0 { light } else { dark };
+            painter.rect_filled(
+                egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, h)),
+                0.0,
+                color,
             );
+            x += w;
+            col += 1;
+        }
+        y += h;
+        row += 1;
+    }
+}
+
+/// 透明度滑块行：左 label + 拉伸滑块（数值由滑块自带显示）。
+fn alpha_slider_row(ui: &mut egui::Ui, label: &str, value: &mut f32) {
+    ui.horizontal(|ui| {
+        ui.label(label);
+        let w = (ui.available_width() - 16.0).max(60.0);
+        ui.add_sized([w, 20.0], egui::Slider::new(value, 0.0..=0.95).fixed_decimals(2));
+    });
+}
+
+/// 图片槽卡片：标题 → 16:9 棋盘格预览区 → 按钮行 → 遮罩透明度滑块。
+/// 返回 true 表示请求打开裁剪编辑器。
+fn slot_card(ui: &mut egui::Ui, title: &str, slot: &mut Slot, ctx: &egui::Context, log: &mut String) -> bool {
+    let mut crop_requested = false;
+    card(ui, title, |ui| {
+        let pw = ui.available_width();
+        let size = egui::vec2(pw, (pw * 9.0 / 16.0).min(190.0));
+        let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+        checkerboard(ui.painter(), rect);
+        if let Some(tex) = &slot.texture {
+            let ts = tex.size_vec2();
+            let s = (rect.width() / ts.x).min(rect.height() / ts.y);
+            let drect = egui::Rect::from_center_size(rect.center(), ts * s);
+            ui.painter().image(
+                tex.id(),
+                drect,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
+        } else {
             ui.painter().text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
                 "未选择图片",
                 egui::FontId::proportional(13.0),
-                egui::Color32::GRAY,
+                C_MUTED,
             );
         }
         if slot.crop.is_some() {
-            ui.colored_label(egui::Color32::from_rgb(120, 220, 120), "已裁剪");
+            ui.colored_label(C_GOOD, "已裁剪");
         }
         let is_gif = slot
             .path
@@ -1853,10 +1945,7 @@ fn slot_ui(ui: &mut egui::Ui, title: &str, slot: &mut Slot, ctx: &egui::Context,
             .map(|e| e.eq_ignore_ascii_case("gif"))
             .unwrap_or(false);
         if is_gif {
-            ui.colored_label(
-                egui::Color32::from_rgb(230, 160, 60),
-                "GIF 动图持续解码播放，会增加耗电（笔记本用电池时更明显）",
-            );
+            ui.colored_label(C_WARN, "GIF 动图持续解码播放，会增加耗电（笔记本用电池时更明显）");
         }
         ui.horizontal(|ui| {
             if ui.button("选择图片").clicked() {
@@ -1887,191 +1976,225 @@ fn slot_ui(ui: &mut egui::Ui, title: &str, slot: &mut Slot, ctx: &egui::Context,
                 crop_requested = true;
             }
         });
-        ui.add(
-            egui::Slider::new(&mut slot.alpha, 0.0..=0.95)
-                .text("遮罩透明度")
-                .fixed_decimals(2),
-        );
+        ui.horizontal(|ui| {
+            ui.label("遮罩透明度");
+            let w = (ui.available_width() - 16.0).max(60.0);
+            ui.add_sized(
+                [w, 20.0],
+                egui::Slider::new(&mut slot.alpha, 0.0..=0.95).fixed_decimals(2),
+            );
+        });
     });
     crop_requested
 }
 
 impl eframe::App for BgToolApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.label("安装路径:");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.install_path)
-                        .desired_width(340.0)
-                        .hint_text("Kimi Code 安装目录"),
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::new()
+                    .fill(C_BG)
+                    .inner_margin(egui::Margin::symmetric(16, 12)),
+            )
+            .show(ctx, |ui| {
+                // 1. 标题（固定在滚动区外）
+                ui.label(egui::RichText::new("Kimi Code 背景更换工具").size(18.0).strong());
+                ui.label(
+                    egui::RichText::new(
+                        "选好图片/视频后点「应用补丁」，运行中的 Kimi Code 约 2 秒自动生效",
+                    )
+                    .size(12.0)
+                    .color(C_MUTED),
                 );
-                if ui.button("浏览...").clicked() {
-                    if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-                        self.install_path = dir.display().to_string();
-                        self.refresh();
-                    }
-                }
-                if ui.button("选 exe...").clicked() {
-                    if let Some(f) = rfd::FileDialog::new()
-                        .add_filter("可执行文件", &["exe"])
-                        .pick_file()
-                    {
-                        self.install_path = f.display().to_string();
-                        self.refresh();
-                    }
-                }
-            });
+                ui.add_space(10.0);
 
-            ui.horizontal(|ui| {
-                match &self.css_name {
-                    Some(name) => {
-                        ui.label(format!("主样式表: {}", name));
-                        if self.patched {
-                            ui.colored_label(egui::Color32::from_rgb(120, 220, 120), "已打补丁");
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    // 2. 安装卡片
+                    card(ui, "安装", |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new("安装路径").strong());
+                            let w = (ui.available_width() - 150.0).max(160.0);
+                            ui.add_sized(
+                                [w, 24.0],
+                                egui::TextEdit::singleline(&mut self.install_path)
+                                    .hint_text("Kimi Code 安装目录"),
+                            );
+                            if ui.button("浏览...").clicked() {
+                                if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                                    self.install_path = dir.display().to_string();
+                                    self.refresh();
+                                }
+                            }
+                            if ui.button("选 exe...").clicked() {
+                                if let Some(f) = rfd::FileDialog::new()
+                                    .add_filter("可执行文件", &["exe"])
+                                    .pick_file()
+                                {
+                                    self.install_path = f.display().to_string();
+                                    self.refresh();
+                                }
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            match &self.css_name {
+                                Some(name) => {
+                                    ui.label(format!("主样式表: {name}"));
+                                    if self.patched {
+                                        ui.colored_label(C_ACCENT, "已打补丁");
+                                    } else {
+                                        ui.colored_label(C_MUTED, "未打补丁");
+                                    }
+                                }
+                                None => {
+                                    let msg = self
+                                        .status_err
+                                        .clone()
+                                        .unwrap_or_else(|| "未检测到 Kimi Code 安装".to_string());
+                                    ui.colored_label(C_WARN, msg);
+                                }
+                            }
+                            if self.bak_exists {
+                                ui.colored_label(C_ACCENT, "备份存在");
+                            } else {
+                                ui.colored_label(C_MUTED, "无备份");
+                            }
+                            if self.hot_enabled {
+                                if self.hot_needs_upgrade {
+                                    ui.colored_label(C_WARN, "热更新: 需升级");
+                                } else {
+                                    ui.colored_label(C_GOOD, "热更新: 已启用 v3");
+                                }
+                            } else {
+                                ui.colored_label(C_MUTED, "热更新: 未启用");
+                            }
+                        });
+                    });
+
+                    ui.add_space(10.0);
+
+                    // 3. 一行两卡：深色 / 浅色背景
+                    let mut log = std::mem::take(&mut self.log);
+                    let mut crop_req: Option<SlotKind> = None;
+                    ui.spacing_mut().item_spacing.x = 10.0;
+                    ui.columns(2, |cols| {
+                        if slot_card(&mut cols[0], "深色背景", &mut self.dark, ctx, &mut log) {
+                            crop_req = Some(SlotKind::Dark);
+                        }
+                        if slot_card(&mut cols[1], "浅色背景", &mut self.light, ctx, &mut log) {
+                            crop_req = Some(SlotKind::Light);
+                        }
+                    });
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    self.log = log;
+                    if let Some(kind) = crop_req {
+                        self.open_crop_editor(kind, ctx);
+                    }
+
+                    ui.add_space(10.0);
+
+                    // 4. 视频背景卡片
+                    card(ui, "视频背景（MP4）", |ui| {
+                        match &self.video_path {
+                            Some(p) => {
+                                let name = p
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().into_owned())
+                                    .unwrap_or_default();
+                                ui.label(format!("已选择: {name}"));
+                            }
+                            None => {
+                                ui.label(egui::RichText::new("未选择视频").color(C_MUTED));
+                            }
+                        }
+                        ui.horizontal(|ui| {
+                            if ui.button("选择视频").clicked() {
+                                let picked = rfd::FileDialog::new()
+                                    .add_filter("MP4 视频", &["mp4"])
+                                    .pick_file();
+                                if let Some(f) = picked {
+                                    self.log_push(&format!("已选择视频: {}", f.display()));
+                                    self.video_path = Some(f);
+                                }
+                            }
+                            if ui
+                                .add_enabled(self.video_path.is_some(), egui::Button::new("清除"))
+                                .clicked()
+                            {
+                                self.video_path = None;
+                            }
+                        });
+                        ui.colored_label(
+                            C_WARN,
+                            "视频/动图背景持续占用 CPU/GPU，会增加耗电（笔记本用电池时更明显）",
+                        );
+                    });
+
+                    ui.add_space(10.0);
+
+                    // 5. 界面透明度卡片
+                    card(ui, "界面透明度", |ui| {
+                        alpha_slider_row(ui, "侧边栏/标题栏透明度", &mut self.side_alpha);
+                        alpha_slider_row(ui, "面板透明度（右侧预览/聊天面板）", &mut self.panel_alpha);
+                    });
+
+                    ui.add_space(10.0);
+
+                    // 6. 操作行
+                    ui.horizontal(|ui| {
+                        let apply_btn =
+                            egui::Button::new(egui::RichText::new("应用补丁").strong().color(egui::Color32::WHITE))
+                                .fill(C_ACCENT)
+                                .min_size(egui::vec2(120.0, 30.0));
+                        if ui.add(apply_btn).clicked() {
+                            self.do_apply();
+                        }
+                        if ui
+                            .add(egui::Button::new("还原原版").min_size(egui::vec2(100.0, 30.0)))
+                            .clicked()
+                        {
+                            self.do_restore();
+                        }
+                        if self.hot_enabled && !self.hot_needs_upgrade {
+                            if ui
+                                .add(egui::Button::new("卸载热更新").min_size(egui::vec2(100.0, 30.0)))
+                                .clicked()
+                            {
+                                self.do_remove_hook();
+                            }
                         } else {
-                            ui.colored_label(egui::Color32::LIGHT_GRAY, "未打补丁");
+                            let label = if self.hot_needs_upgrade {
+                                "升级热更新"
+                            } else {
+                                "安装热更新"
+                            };
+                            if ui
+                                .add(egui::Button::new(label).min_size(egui::vec2(100.0, 30.0)))
+                                .clicked()
+                            {
+                                self.do_install_hook();
+                            }
                         }
-                    }
-                    None => {
-                        let msg = self
-                            .status_err
-                            .clone()
-                            .unwrap_or_else(|| "未检测到 Kimi Code 安装".to_string());
-                        ui.colored_label(egui::Color32::from_rgb(230, 200, 90), msg);
-                    }
-                }
-                if self.bak_exists {
-                    ui.colored_label(egui::Color32::LIGHT_BLUE, "备份存在");
-                } else {
-                    ui.colored_label(egui::Color32::DARK_GRAY, "无备份");
-                }
-                if self.hot_enabled {
-                    if self.hot_needs_upgrade {
-                        ui.colored_label(egui::Color32::from_rgb(230, 200, 90), "热更新: 需升级");
-                    } else {
-                        ui.colored_label(egui::Color32::from_rgb(120, 220, 120), "热更新: 已启用 v3");
-                    }
-                } else {
-                    ui.colored_label(egui::Color32::DARK_GRAY, "热更新: 未启用");
-                }
-            });
+                    });
 
-            ui.separator();
+                    ui.add_space(10.0);
 
-            let mut log = std::mem::take(&mut self.log);
-            let mut crop_req: Option<SlotKind> = None;
-            ui.columns(2, |cols| {
-                if slot_ui(&mut cols[0], "深色背景", &mut self.dark, ctx, &mut log) {
-                    crop_req = Some(SlotKind::Dark);
-                }
-                if slot_ui(&mut cols[1], "浅色背景", &mut self.light, ctx, &mut log) {
-                    crop_req = Some(SlotKind::Light);
-                }
-            });
-            self.log = log;
-            if let Some(kind) = crop_req {
-                self.open_crop_editor(kind, ctx);
-            }
-
-            ui.group(|ui| {
-                ui.label(egui::RichText::new("视频背景（MP4）").strong());
-                match &self.video_path {
-                    Some(p) => {
-                        let name = p
-                            .file_name()
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_default();
-                        ui.label(format!("已选择: {name}"));
-                    }
-                    None => {
-                        ui.label("未选择视频");
-                    }
-                }
-                ui.horizontal(|ui| {
-                    if ui.button("选择视频").clicked() {
-                        let picked = rfd::FileDialog::new()
-                            .add_filter("MP4 视频", &["mp4"])
-                            .pick_file();
-                        if let Some(f) = picked {
-                            self.log_push(&format!("已选择视频: {}", f.display()));
-                            self.video_path = Some(f);
-                        }
-                    }
-                    if ui
-                        .add_enabled(self.video_path.is_some(), egui::Button::new("清除"))
-                        .clicked()
-                    {
-                        self.video_path = None;
-                    }
+                    // 7. 日志卡片
+                    card(ui, "日志", |ui| {
+                        egui::ScrollArea::vertical()
+                            .stick_to_bottom(true)
+                            .max_height(f32::INFINITY)
+                            .show(ui, |ui| {
+                                ui.add(
+                                    egui::TextEdit::multiline(&mut self.log)
+                                        .desired_width(f32::INFINITY)
+                                        .interactive(false)
+                                        .font(egui::TextStyle::Monospace),
+                                );
+                            });
+                    });
+                    ui.add_space(4.0);
                 });
-                ui.colored_label(
-                    egui::Color32::from_rgb(230, 160, 60),
-                    "视频/动图背景持续占用 CPU/GPU，会增加耗电（笔记本用电池时更明显）",
-                );
             });
-
-            ui.add(
-                egui::Slider::new(&mut self.side_alpha, 0.0..=0.95)
-                    .text("侧边栏/标题栏透明度")
-                    .fixed_decimals(2),
-            );
-            ui.add(
-                egui::Slider::new(&mut self.panel_alpha, 0.0..=0.95)
-                    .text("面板透明度（右侧预览/聊天面板）")
-                    .fixed_decimals(2),
-            );
-
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                let apply_btn = egui::Button::new(egui::RichText::new("应用补丁").strong())
-                    .min_size(egui::vec2(120.0, 30.0));
-                if ui.add(apply_btn).clicked() {
-                    self.do_apply();
-                }
-                if ui
-                    .add(egui::Button::new("还原原版").min_size(egui::vec2(100.0, 30.0)))
-                    .clicked()
-                {
-                    self.do_restore();
-                }
-                if self.hot_enabled && !self.hot_needs_upgrade {
-                    if ui
-                        .add(egui::Button::new("卸载热更新").min_size(egui::vec2(100.0, 30.0)))
-                        .clicked()
-                    {
-                        self.do_remove_hook();
-                    }
-                } else {
-                    let label = if self.hot_needs_upgrade {
-                        "升级热更新"
-                    } else {
-                        "安装热更新"
-                    };
-                    if ui
-                        .add(egui::Button::new(label).min_size(egui::vec2(100.0, 30.0)))
-                        .clicked()
-                    {
-                        self.do_install_hook();
-                    }
-                }
-            });
-
-            ui.separator();
-            ui.label("日志:");
-            egui::ScrollArea::vertical()
-                .stick_to_bottom(true)
-                .max_height(f32::INFINITY)
-                .show(ui, |ui| {
-                    ui.add(
-                        egui::TextEdit::multiline(&mut self.log)
-                            .desired_width(f32::INFINITY)
-                            .interactive(false)
-                            .font(egui::TextStyle::Monospace),
-                    );
-                });
-        });
 
         self.show_crop_editor(ctx);
         self.update_persistence(ctx);
@@ -2116,8 +2239,8 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Kimi Code 背景更换工具")
-            .with_inner_size([760.0, 700.0])
-            .with_min_inner_size([680.0, 600.0]),
+            .with_inner_size([860.0, 800.0])
+            .with_min_inner_size([720.0, 600.0]),
         ..Default::default()
     };
     eframe::run_native(

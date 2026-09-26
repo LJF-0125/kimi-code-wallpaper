@@ -32,7 +32,13 @@ cargo test --release     # 全部测试必须通过
 ### 图片管线
 - `process_image(path, crop)`：load_from_memory → 可选 crop_imm 裁剪（归一化 CropRect 转像素，round+clamp，宽高≥1）→ 最长边压到 2560 → JPEG（先 q82，超 900KB 降 q70）→ base64
 - `MAX_JPEG_BYTES = 900KB`：base64 内嵌进 CSS，太大样式表会膨胀
-- 裁剪选区 `CropRect` 是归一化坐标（0..1），不落盘，仅 GUI 会话内有效
+- 裁剪选区 `CropRect` 是归一化坐标（0..1），随配置持久化到 `kimi-bg-tool.conf`（见下节），启动时恢复
+
+### 配置持久化
+- `kimi-bg-tool.conf`（exe 同目录，`conf_path()` 基于 `current_exe`，失败则静默跳过）：`key=value` 每行一条，持久化安装路径、side/panel 透明度、两槽位的 path/alpha/裁剪选区（`x,y,w,h` 逗号分隔，None 不写行）。解析用 `splitn(2, '=')`，路径含 `=`/中文安全
+- `SettingsSnapshot::to_conf/from_conf` 纯函数（有单测），from_conf 对缺行/坏行/未知键容错，缺字段取默认值（alpha 0.80/0.78/0.55/0.25）
+- 防抖 500ms 写盘：`update_persistence` 每帧比对 `snapshot().to_conf()`，变了记 `save_due`，到期才 `fs::write`；`request_repaint_after` 保证工具闲置时到期帧被唤醒落盘。写失败仅记一行日志不重试刷屏
+- 启动恢复顺序：注册表自动检测在前 → conf 覆盖（conf 字段优先，用户手改的安装路径高于注册表）→ 槽位图片文件失效时清槽并记日志「上次选择的图片已失效: <路径>」
 
 ### GUI
 - egui 无 CJK 字体，`install_cjk_font` 从 `C:\Windows\Fonts` 加载微软雅黑，别删

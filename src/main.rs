@@ -2,6 +2,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context};
 use eframe::egui;
@@ -11,6 +12,8 @@ const PATCH_HEADER: &str = "/* === kimi-wallpaper-patch === */";
 const PATCH_END_MARK: &str = "kimi-wallpaper-patch end === */";
 const MAX_TEXTURE_SIDE: u32 = 2560;
 const MAX_JPEG_BYTES: usize = 900 * 1024;
+const CONF_FILE_NAME: &str = "kimi-bg-tool.conf";
+const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 
 const HOT_HOOK_START: &str = "<!-- === kimi-wallpaper-hot-hook === -->";
 const HOT_HOOK_END: &str = "<!-- === kimi-wallpaper-hot-hook end === -->";
@@ -230,6 +233,130 @@ impl Slot {
     }
 }
 
+// ---------- 配置持久化 ----------
+
+/// 配置文件路径：exe 同目录。current_exe 失败则返回 None（静默跳过持久化）。
+fn conf_path() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|d| d.join(CONF_FILE_NAME)))
+}
+
+#[derive(Clone, PartialEq, Debug)]
+struct SettingsSnapshot {
+    install_path: String,
+    side_alpha: f32,
+    panel_alpha: f32,
+    dark_path: Option<PathBuf>,
+    dark_alpha: f32,
+    dark_crop: Option<CropRect>,
+    light_path: Option<PathBuf>,
+    light_alpha: f32,
+    light_crop: Option<CropRect>,
+}
+
+impl Default for SettingsSnapshot {
+    fn default() -> Self {
+        Self {
+            install_path: String::new(),
+            side_alpha: 0.55,
+            panel_alpha: 0.25,
+            dark_path: None,
+            dark_alpha: 0.80,
+            light_path: None,
+            light_alpha: 0.78,
+            dark_crop: None,
+            light_crop: None,
+        }
+    }
+}
+
+impl SettingsSnapshot {
+    /// 序列化为 key=value 每行一条的文本。path/crop 为 None 时不写对应行。
+    fn to_conf(&self) -> String {
+        let mut out = String::new();
+        out.push_str(&format!("install_path={}\n", self.install_path));
+        out.push_str(&format!("side_alpha={:.2}\n", self.side_alpha));
+        out.push_str(&format!("panel_alpha={:.2}\n", self.panel_alpha));
+        out.push_str(&format!("dark.alpha={:.2}\n", self.dark_alpha));
+        if let Some(p) = &self.dark_path {
+            out.push_str(&format!("dark.path={}\n", p.display()));
+        }
+        if let Some(c) = &self.dark_crop {
+            out.push_str(&format!("dark.crop={},{},{},{}\n", c.x, c.y, c.w, c.h));
+        }
+        out.push_str(&format!("light.alpha={:.2}\n", self.light_alpha));
+        if let Some(p) = &self.light_path {
+            out.push_str(&format!("light.path={}\n", p.display()));
+        }
+        if let Some(c) = &self.light_crop {
+            out.push_str(&format!("light.crop={},{},{},{}\n", c.x, c.y, c.w, c.h));
+        }
+        out
+    }
+
+    /// 解析 conf 文本；缺行/坏行/未知键一律容错，缺失字段取默认值。
+    fn from_conf(text: &str) -> Self {
+        let mut snap = Self::default();
+        for raw in text.lines() {
+            let line = raw.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut it = line.splitn(2, '=');
+            let key = it.next().unwrap_or_default().trim();
+            let val = it.next().unwrap_or_default().trim();
+            match key {
+                "install_path" => snap.install_path = val.to_string(),
+                "side_alpha" => {
+                    if let Ok(x) = val.parse::<f32>() {
+                        snap.side_alpha = x;
+                    }
+                }
+                "panel_alpha" => {
+                    if let Ok(x) = val.parse::<f32>() {
+                        snap.panel_alpha = x;
+                    }
+                }
+                "dark.alpha" => {
+                    if let Ok(x) = val.parse::<f32>() {
+                        snap.dark_alpha = x;
+                    }
+                }
+                "light.alpha" => {
+                    if let Ok(x) = val.parse::<f32>() {
+                        snap.light_alpha = x;
+                    }
+                }
+                "dark.path" => {
+                    snap.dark_path = (!val.is_empty()).then(|| PathBuf::from(val));
+                }
+                "light.path" => {
+                    snap.light_path = (!val.is_empty()).then(|| PathBuf::from(val));
+                }
+                "dark.crop" => snap.dark_crop = parse_crop(val),
+                "light.crop" => snap.light_crop = parse_crop(val),
+                _ => {} // 未知键忽略
+            }
+        }
+        snap
+    }
+}
+
+/// `x,y,w,h` 四个 f32 逗号分隔；任一部分解析失败或不是 4 段则返回 None。
+fn parse_crop(val: &str) -> Option<CropRect> {
+    let parts: Vec<&str> = val.split(',').collect();
+    if parts.len() != 4 {
+        return None;
+    }
+    let nums: Option<Vec<f32>> = parts
+        .iter()
+        .map(|p| p.trim().parse::<f32>().ok())
+        .collect();
+    let n = nums?;
+    Some(CropRect { x: n[0], y: n[1], w: n[2], h: n[3] })
+}
+
 struct BgToolApp {
     install_path: String,
     root: Option<PathBuf>,
@@ -244,6 +371,9 @@ struct BgToolApp {
     panel_alpha: f32,
     log: String,
     crop_editor: Option<CropEditor>,
+    saved_conf: String,
+    pending_conf: Option<String>,
+    save_due: Option<Instant>,
 }
 
 impl BgToolApp {
@@ -262,6 +392,9 @@ impl BgToolApp {
             panel_alpha: 0.25,
             log: String::new(),
             crop_editor: None,
+            saved_conf: String::new(),
+            pending_conf: None,
+            save_due: None,
         };
         app.log_push("Kimi Code 背景更换工具已启动");
         match detect_install_path() {
@@ -271,8 +404,14 @@ impl BgToolApp {
             }
             None => app.log_push("未自动检测到 Kimi Code 安装路径，请手动选择"),
         }
+        // 恢复 conf：conf 里有的字段以 conf 为准（用户手改的安装路径优先于注册表检测）
+        if let Some(text) = conf_path().and_then(|p| fs::read_to_string(p).ok()) {
+            let snap = SettingsSnapshot::from_conf(&text);
+            app.apply_snapshot(&snap, &cc.egui_ctx);
+            app.saved_conf = app.snapshot().to_conf();
+            app.log_push("已从 kimi-bg-tool.conf 恢复上次配置");
+        }
         app.refresh();
-        let _ = cc;
         app
     }
 
@@ -280,6 +419,94 @@ impl BgToolApp {
         self.log.push_str(msg);
         if !msg.ends_with('\n') {
             self.log.push('\n');
+        }
+    }
+
+    fn snapshot(&self) -> SettingsSnapshot {
+        SettingsSnapshot {
+            install_path: self.install_path.clone(),
+            side_alpha: self.side_alpha,
+            panel_alpha: self.panel_alpha,
+            dark_path: self.dark.path.clone(),
+            dark_alpha: self.dark.alpha,
+            dark_crop: self.dark.crop,
+            light_path: self.light.path.clone(),
+            light_alpha: self.light.alpha,
+            light_crop: self.light.crop,
+        }
+    }
+
+    fn apply_snapshot(&mut self, s: &SettingsSnapshot, ctx: &egui::Context) {
+        self.install_path = s.install_path.clone();
+        self.side_alpha = s.side_alpha;
+        self.panel_alpha = s.panel_alpha;
+        let msgs = [
+            Self::restore_slot(&mut self.dark, &s.dark_path, s.dark_alpha, s.dark_crop, ctx),
+            Self::restore_slot(&mut self.light, &s.light_path, s.light_alpha, s.light_crop, ctx),
+        ];
+        for m in msgs.into_iter().flatten() {
+            self.log_push(&m);
+        }
+    }
+
+    /// 恢复单个槽位：文件缺失或预览加载失败时清掉该槽并返回提示信息。
+    fn restore_slot(
+        slot: &mut Slot,
+        path: &Option<PathBuf>,
+        alpha: f32,
+        crop: Option<CropRect>,
+        ctx: &egui::Context,
+    ) -> Option<String> {
+        slot.alpha = alpha;
+        slot.crop = None;
+        slot.path = None;
+        slot.texture = None;
+        let Some(p) = path else { return None };
+        if !p.is_file() {
+            return Some(format!("上次选择的图片已失效: {}", p.display()));
+        }
+        match load_preview(ctx, p, 240) {
+            Ok(tex) => {
+                slot.path = Some(p.clone());
+                slot.texture = Some(tex);
+                slot.crop = crop;
+                None
+            }
+            Err(_) => Some(format!("上次选择的图片已失效: {}", p.display())),
+        }
+    }
+
+    /// 防抖持久化：每帧比对序列化结果，变化后记 save_due，到期才写盘；
+    /// request_repaint_after 保证工具闲置时到期帧也会被唤醒执行保存。
+    fn update_persistence(&mut self, ctx: &egui::Context) {
+        let current = self.snapshot().to_conf();
+        let dirty = match &self.pending_conf {
+            Some(p) => *p != current,
+            None => current != self.saved_conf,
+        };
+        if dirty {
+            self.pending_conf = Some(current);
+            self.save_due = Some(Instant::now() + SAVE_DEBOUNCE);
+        }
+        let Some(due) = self.save_due else { return };
+        let now = Instant::now();
+        if now < due {
+            ctx.request_repaint_after(due.saturating_duration_since(now));
+            return;
+        }
+        if let Some(content) = self.pending_conf.take() {
+            self.save_due = None;
+            match conf_path() {
+                Some(p) => match fs::write(&p, &content) {
+                    Ok(()) => self.saved_conf = content,
+                    Err(e) => {
+                        // 标记为已保存避免反复重试刷屏，仅记一行日志
+                        self.saved_conf = content;
+                        self.log_push(&format!("配置保存失败: {e:#}"));
+                    }
+                },
+                None => self.saved_conf = content,
+            }
         }
     }
 
@@ -1305,6 +1532,7 @@ impl eframe::App for BgToolApp {
         });
 
         self.show_crop_editor(ctx);
+        self.update_persistence(ctx);
     }
 }
 
@@ -1662,5 +1890,72 @@ mod tests {
         assert!(w >= 1 && h >= 1);
         assert!(w <= 32 && h <= 32);
         assert!(!b64_clamped.is_empty());
+    }
+
+    #[test]
+    fn test_conf_round_trip_with_crop() {
+        let s = SettingsSnapshot {
+            install_path: "T:\\Kimi Code".to_string(),
+            side_alpha: 0.55,
+            panel_alpha: 0.25,
+            dark_path: Some(PathBuf::from("C:\\图 片\\dark=1.png")),
+            dark_alpha: 0.80,
+            dark_crop: Some(CropRect { x: 0.1, y: 0.2, w: 0.5, h: 0.4 }),
+            light_path: None,
+            light_alpha: 0.78,
+            light_crop: None,
+        };
+        let back = SettingsSnapshot::from_conf(&s.to_conf());
+        assert_eq!(back, s, "含 crop 的完整快照应 round-trip（含中文/空格/= 路径）");
+    }
+
+    #[test]
+    fn test_conf_round_trip_no_crop_and_equals_path() {
+        let s = SettingsSnapshot {
+            install_path: String::new(),
+            side_alpha: 0.30,
+            panel_alpha: 0.10,
+            dark_path: Some(PathBuf::from("D:\\a=b\\壁纸.png")),
+            dark_alpha: 0.90,
+            dark_crop: None,
+            light_path: Some(PathBuf::from("E:\\light.jpg")),
+            light_alpha: 0.70,
+            light_crop: Some(CropRect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 }),
+        };
+        let back = SettingsSnapshot::from_conf(&s.to_conf());
+        assert_eq!(back.dark_path, s.dark_path);
+        assert_eq!(back.light_path, s.light_path);
+        assert!(back.dark_crop.is_none());
+        assert_eq!(back.light_crop, s.light_crop);
+        assert!((back.side_alpha - 0.30).abs() < 1e-6);
+        assert!((back.dark_alpha - 0.90).abs() < 1e-6);
+        assert!((back.light_alpha - 0.70).abs() < 1e-6);
+        // conf 文本本身不应含 dark.crop 行
+        assert!(!s.to_conf().contains("dark.crop"));
+    }
+
+    #[test]
+    fn test_from_conf_tolerates_garbage_and_missing() {
+        let text = "\
+# 注释行应被跳过
+完全乱写的一行
+side_alpha=不是数字
+unknown_key=zzz
+
+dark.crop=0.1,0.2,bad
+dark.crop=0.1,0.2,0.3
+dark.alpha=0.66
+dark.path=
+light.crop=,,
+";
+        let s = SettingsSnapshot::from_conf(text);
+        assert_eq!(s.install_path, "", "缺 install_path 行应为空串");
+        assert!((s.side_alpha - 0.55).abs() < 1e-6, "坏 alpha 应回落默认值");
+        assert!((s.panel_alpha - 0.25).abs() < 1e-6);
+        assert!((s.dark_alpha - 0.66).abs() < 1e-6, "合法行仍应生效");
+        assert_eq!(s.dark_crop, None, "坏 crop 应为 None");
+        assert_eq!(s.dark_path, None, "空 path 应为 None");
+        assert_eq!(s.light_crop, None);
+        assert!((s.light_alpha - 0.78).abs() < 1e-6);
     }
 }

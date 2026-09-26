@@ -30,6 +30,7 @@ cargo test --release     # 全部测试必须通过
 - 热更文件：`kimi-wallpaper-hot.css`（=补丁全文）+ `kimi-wallpaper-hot.json`（`{"v":N,"video":"kimi-wallpaper-video-<时间戳>.mp4"|null}`）。**必须先写 css 后写 json**，版本号 `max(旧+1, unix毫秒)`，探针以 json 为准；video 字段驱动视频层挂载/移除
 - 视频文件不内嵌：应用时部署为**版本化文件名** `desktop-dist\kimi-wallpaper-video-<毫秒时间戳>.mp4`（不用固定名——Windows 不允许写入被播放实例占用的文件，直接覆盖会 OS error 32 部署失败），探针按 json 里的名字 fetch。部署成功后惰性清理其余 `kimi-wallpaper-video*.mp4`（含历史固定名），删除失败（旧文件仍被占用）忽略并提示「下次应用时自动清理」；清除视频时删全部版本化文件，json 照常写 null
 - faststart 重封装**保留**（`mp4_moov_before_mdat` 检测 + `faststart_remux` 纯搬盒子：moov 移到 mdat 前 + stco/co64 chunk 偏移修正）：当前 blob 路径下非必需，但有益无害，且对未来协议修复后可直放有意义
+- **音轨剥除**（`mp4_track_handlers` 检测 + `strip_audio_remux`）：探针 muted 播放、音轨纯浪费，部署时剥除音轨/字幕/数据轨——保留第一个 vide trak，按 stsc/stsz/stco 样本表从原 mdat 提取视频样本重建 mdat（一样本一 chunk），moov 只含视频轨（mvhd/tkhd/stsd/stts/ctts/stss 原样），输出天然 faststart（ftyp+moov+mdat）。无音轨视频不做重建直接走 faststart 路径；分片 MP4（mvex）/stz2/表不一致一律 Err 回退原样部署并日志
 - 探针 fetch **必须用绝对路径** `/kimi-wallpaper-hot.*`——相对路径在 `/sessions/<id>` 路由下会 404 静默失效（踩过的坑）
 - 升级检测：`hook_needs_upgrade` = 含起始标记但缺 `HOOK_VERSION_MARK`（v1/v2 等无当前标记的旧块）。`install_hook` 幂等策略：未安装→插入；旧块→remove 后再插当前块；已当前→原样返回。UI 三态：绿「已启用 v3」/ 黄「需升级」（按钮「升级热更新」）/ 灰「未启用」
 - **纯视频白屏修复**：图片槽全空但视频激活时，`build_patch` 返回 None 会把热更 CSS 清空 → 界面恢复不透明背景盖住视频层（白屏）。`do_apply` 在该分支改发 `build_video_patch`（`VIDEO_TEMPLATE`：透明化规则 + `--kimi-wallpaper-mask` 变量 + html `background:transparent`，无图片）；无任何配置（无图无视频）时仍返回 None 走纯还原，行为不变

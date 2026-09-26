@@ -681,6 +681,16 @@ impl BgToolApp {
         match deploy_video_file(src, dist) {
             Ok(d) => {
                 self.log_push(&format!("视频已部署: {:.1} MB", d.bytes as f64 / 1024.0 / 1024.0));
+                if let Some((before, after)) = d.stripped {
+                    self.log_push(&format!(
+                        "已剥除音轨/附加轨，仅保留视频轨（体积 {:.1} MB → {:.1} MB）",
+                        before as f64 / 1024.0 / 1024.0,
+                        after as f64 / 1024.0 / 1024.0
+                    ));
+                }
+                if d.strip_failed {
+                    self.log_push("音轨剥除失败，按原样部署（含音轨）");
+                }
                 if d.remuxed {
                     self.log_push("视频 moov 在文件尾，已自动重封装为 faststart（不转码，画质无损）");
                 }
@@ -1454,16 +1464,26 @@ const MP4_CONTAINERS: [[u8; 4]; 8] = [
     *b"moov", *b"trak", *b"mdia", *b"minf", *b"stbl", *b"edts", *b"udta", *b"dinf",
 ];
 
-/// 解析顶层 box 序列：每个 box 为 4 字节大端 size + 4 字节 type；
-/// size==1 时紧跟 8 字节 largesize；size==0 表示到文件尾。
-/// 返回 (type, 起始偏移, 总大小含头)。
-fn parse_top_boxes(data: &[u8]) -> anyhow::Result<Vec<([u8; 4], usize, u64)>> {
+/// MP4 box 描述：(type, 起始偏移, 总大小含头)。
+type BoxInfo = ([u8; 4], usize, u64);
+
+/// box 头长度（8 或 16 字节 largesize）。
+fn box_header_len(data: &[u8], start: usize) -> anyhow::Result<usize> {
+    let h = data
+        .get(start..start + 4)
+        .ok_or_else(|| anyhow!("box 头不完整（偏移 {start}）"))?;
+    Ok(if u32::from_be_bytes(h.try_into().unwrap()) == 1 { 16 } else { 8 })
+}
+
+/// 解析 [start,end) 区间的 box 序列：每个 box 为 4 字节大端 size + 4 字节 type；
+/// size==1 时紧跟 8 字节 largesize；size==0 表示到区间尾。
+fn walk_boxes(data: &[u8], start: usize, end: usize) -> anyhow::Result<Vec<BoxInfo>> {
     let mut out = Vec::new();
-    let mut pos = 0usize;
-    while pos < data.len() {
+    let mut pos = start;
+    while pos < end {
         let head = data
             .get(pos..pos + 8)
-            .ok_or_else(|| anyhow!("MP4 顶层 box 头部不完整（偏移 {pos}）"))?;
+            .ok_or_else(|| anyhow!("MP4 box 头部不完整（偏移 {pos}）"))?;
         let size32 = u32::from_be_bytes(head[0..4].try_into().unwrap());
         let typ: [u8; 4] = head[4..8].try_into().unwrap();
         let (header, size) = match size32 {
@@ -1473,24 +1493,39 @@ fn parse_top_boxes(data: &[u8]) -> anyhow::Result<Vec<([u8; 4], usize, u64)>> {
                     .ok_or_else(|| anyhow!("MP4 largesize box 头部不完整（偏移 {pos}）"))?;
                 (16u64, u64::from_be_bytes(ext.try_into().unwrap()))
             }
-            0 => (8u64, data.len() as u64 - pos as u64),
+            0 => (8u64, end as u64 - pos as u64),
             s => (8u64, s as u64),
         };
         if size < header {
             bail!("MP4 box {:?} size 非法: {size} < 头 {header}", String::from_utf8_lossy(&typ));
         }
-        let end = pos as u64 + size;
-        if end > data.len() as u64 {
+        let box_end = pos as u64 + size;
+        if box_end > end as u64 {
             bail!(
-                "MP4 box {:?} 越界: 结束 {end} > 文件长度 {}",
-                String::from_utf8_lossy(&typ),
-                data.len()
+                "MP4 box {:?} 越界: 结束 {box_end} > 区间尾 {end}",
+                String::from_utf8_lossy(&typ)
             );
         }
         out.push((typ, pos, size));
-        pos = end as usize;
+        pos = box_end as usize;
     }
     Ok(out)
+}
+
+/// 解析顶层 box 序列。
+fn parse_top_boxes(data: &[u8]) -> anyhow::Result<Vec<BoxInfo>> {
+    walk_boxes(data, 0, data.len())
+}
+
+/// 列出容器 box 的子 box。
+fn child_boxes(data: &[u8], parent: &BoxInfo) -> anyhow::Result<Vec<BoxInfo>> {
+    let header = box_header_len(data, parent.1)?;
+    walk_boxes(data, parent.1 + header, parent.1 + parent.2 as usize)
+}
+
+/// 取 box 原始字节（含头）。
+fn raw_box<'a>(data: &'a [u8], b: &BoxInfo) -> &'a [u8] {
+    &data[b.1..b.1 + b.2 as usize]
 }
 
 /// moov 是否在 mdat 之前（faststart 判定）。找不到任一个则 Err。
@@ -1638,6 +1673,403 @@ fn faststart_remux(data: &[u8]) -> anyhow::Result<Vec<u8>> {
     Ok(out)
 }
 
+/// 构造一个 8 字节头的 MP4 box（payload ≥ 4GB-8 时报错）。
+fn make_box(typ: [u8; 4], payload: &[u8]) -> anyhow::Result<Vec<u8>> {
+    let size = payload.len() as u64 + 8;
+    if size > u32::MAX as u64 {
+        bail!("box {:?} 超过 4GB，不支持", String::from_utf8_lossy(&typ));
+    }
+    let mut v = Vec::with_capacity(size as usize);
+    v.extend_from_slice(&(size as u32).to_be_bytes());
+    v.extend_from_slice(&typ);
+    v.extend_from_slice(payload);
+    Ok(v)
+}
+
+/// 列出 moov 里全部 trak 的 handler 类型（vide/soun/text 等），供调用方快速判断有无音轨。
+fn mp4_track_handlers(data: &[u8]) -> anyhow::Result<Vec<[u8; 4]>> {
+    let top = parse_top_boxes(data)?;
+    let moov = top
+        .iter()
+        .find(|b| b.0 == *b"moov")
+        .ok_or_else(|| anyhow!("未找到 moov box"))?;
+    let moov_kids = child_boxes(data, moov)?;
+    let mut out = Vec::new();
+    for k in &moov_kids {
+        if k.0 == *b"trak" {
+            out.push(trak_handler(data, k)?);
+        }
+    }
+    if out.is_empty() {
+        bail!("moov 内无 trak");
+    }
+    Ok(out)
+}
+
+/// 读 trak 的 handler 类型（mdia/hdlr，payload 偏移 8..12）。
+fn trak_handler(data: &[u8], trak: &BoxInfo) -> anyhow::Result<[u8; 4]> {
+    let tk = child_boxes(data, trak)?;
+    let mdia = tk
+        .iter()
+        .find(|k| k.0 == *b"mdia")
+        .ok_or_else(|| anyhow!("trak 缺 mdia"))?;
+    let mk = child_boxes(data, mdia)?;
+    let hdlr = mk
+        .iter()
+        .find(|k| k.0 == *b"hdlr")
+        .ok_or_else(|| anyhow!("mdia 缺 hdlr"))?;
+    let hs = hdlr.1 + box_header_len(data, hdlr.1)?;
+    let p = data
+        .get(hs..hs + 12)
+        .ok_or_else(|| anyhow!("hdlr box 过短"))?;
+    Ok(p[8..12].try_into().unwrap())
+}
+
+/// 定位 trak > mdia > minf > stbl。
+fn find_stbl(data: &[u8], trak: &BoxInfo) -> anyhow::Result<BoxInfo> {
+    let tk = child_boxes(data, trak)?;
+    let mdia = tk
+        .iter()
+        .find(|k| k.0 == *b"mdia")
+        .ok_or_else(|| anyhow!("trak 缺 mdia"))?;
+    let mk = child_boxes(data, mdia)?;
+    let minf = mk
+        .iter()
+        .find(|k| k.0 == *b"minf")
+        .ok_or_else(|| anyhow!("mdia 缺 minf"))?;
+    let fk = child_boxes(data, minf)?;
+    let stbl = fk
+        .iter()
+        .find(|k| k.0 == *b"stbl")
+        .ok_or_else(|| anyhow!("minf 缺 stbl"))?;
+    Ok(*stbl)
+}
+
+/// 解析 stbl：保留原样的盒子（stsd/stts/ctts/stss）+ 展开后的样本表。
+struct StblParts<'a> {
+    stsd: &'a [u8],
+    stts: &'a [u8],
+    ctts: Option<&'a [u8]>,
+    stss: Option<&'a [u8]>,
+    /// 每个样本的字节大小（常量 stsz 也展开成表）。
+    sample_sizes: Vec<u32>,
+    /// chunk 偏移（stco 或 co64）。
+    chunk_offsets: Vec<u64>,
+    /// (first_chunk, samples_per_chunk, sample_description_index)
+    stsc: Vec<(u32, u32, u32)>,
+}
+
+fn parse_stbl<'a>(data: &'a [u8], stbl: &BoxInfo) -> anyhow::Result<StblParts<'a>> {
+    let kids = child_boxes(data, stbl)?;
+    let mut stsd = None;
+    let mut stts = None;
+    let mut ctts = None;
+    let mut stss = None;
+    let mut stsc = None;
+    let mut stsz = None;
+    let mut stco = None;
+    let mut co64 = None;
+    for k in &kids {
+        match &k.0 {
+            b"stsd" => stsd = Some(*k),
+            b"stts" => stts = Some(*k),
+            b"ctts" => ctts = Some(*k),
+            b"stss" => stss = Some(*k),
+            b"stsc" => stsc = Some(*k),
+            b"stsz" => stsz = Some(*k),
+            b"stz2" => bail!("stz2 压缩样本表不支持"),
+            b"stco" => stco = Some(*k),
+            b"co64" => co64 = Some(*k),
+            other => bail!("stbl 含不支持的 box {:?}", String::from_utf8_lossy(other)),
+        }
+    }
+    let stsd = stsd.map(|b| raw_box(data, &b)).ok_or_else(|| anyhow!("stbl 缺 stsd"))?;
+    let stts = stts.map(|b| raw_box(data, &b)).ok_or_else(|| anyhow!("stbl 缺 stts"))?;
+    let ctts = ctts.map(|b| raw_box(data, &b));
+    let stss = stss.map(|b| raw_box(data, &b));
+    // stsz：version/flags 4 + sample_size 4 + sample_count 4 + 表（sample_size==0 时）
+    let stsz_b = stsz.ok_or_else(|| anyhow!("stbl 缺 stsz"))?;
+    let sp = stsz_b.1 + box_header_len(data, stsz_b.1)?;
+    let sbody = data
+        .get(sp..stsz_b.1 + stsz_b.2 as usize)
+        .ok_or_else(|| anyhow!("stsz 越界"))?;
+    if sbody.len() < 12 {
+        bail!("stsz box 过短");
+    }
+    let constant = u32::from_be_bytes(sbody[4..8].try_into().unwrap());
+    let count = u32::from_be_bytes(sbody[8..12].try_into().unwrap()) as usize;
+    let sample_sizes = if constant != 0 {
+        vec![constant; count]
+    } else {
+        if sbody.len() < 12 + count * 4 {
+            bail!("stsz 样本表越界");
+        }
+        (0..count)
+            .map(|i| u32::from_be_bytes(sbody[12 + i * 4..16 + i * 4].try_into().unwrap()))
+            .collect()
+    };
+    // stco / co64
+    let chunk_offsets = match (stco, co64) {
+        (Some(c), None) => {
+            let p = c.1 + box_header_len(data, c.1)?;
+            let body = data
+                .get(p..c.1 + c.2 as usize)
+                .ok_or_else(|| anyhow!("stco 越界"))?;
+            if body.len() < 8 {
+                bail!("stco box 过短");
+            }
+            let n = u32::from_be_bytes(body[4..8].try_into().unwrap()) as usize;
+            if body.len() < 8 + n * 4 {
+                bail!("stco entry 越界");
+            }
+            (0..n)
+                .map(|i| u32::from_be_bytes(body[8 + i * 4..12 + i * 4].try_into().unwrap()) as u64)
+                .collect()
+        }
+        (None, Some(c)) => {
+            let p = c.1 + box_header_len(data, c.1)?;
+            let body = data
+                .get(p..c.1 + c.2 as usize)
+                .ok_or_else(|| anyhow!("co64 越界"))?;
+            if body.len() < 8 {
+                bail!("co64 box 过短");
+            }
+            let n = u32::from_be_bytes(body[4..8].try_into().unwrap()) as usize;
+            if body.len() < 8 + n * 8 {
+                bail!("co64 entry 越界");
+            }
+            (0..n)
+                .map(|i| u64::from_be_bytes(body[8 + i * 8..16 + i * 8].try_into().unwrap()))
+                .collect()
+        }
+        _ => bail!("stco/co64 必须恰有一个"),
+    };
+    // stsc
+    let sc = stsc.ok_or_else(|| anyhow!("stbl 缺 stsc"))?;
+    let p = sc.1 + box_header_len(data, sc.1)?;
+    let body = data
+        .get(p..sc.1 + sc.2 as usize)
+        .ok_or_else(|| anyhow!("stsc 越界"))?;
+    if body.len() < 8 {
+        bail!("stsc box 过短");
+    }
+    let n = u32::from_be_bytes(body[4..8].try_into().unwrap()) as usize;
+    if body.len() < 8 + n * 12 {
+        bail!("stsc entry 越界");
+    }
+    let stsc: Vec<(u32, u32, u32)> = (0..n)
+        .map(|i| {
+            let o = 8 + i * 12;
+            (
+                u32::from_be_bytes(body[o..o + 4].try_into().unwrap()),
+                u32::from_be_bytes(body[o + 4..o + 8].try_into().unwrap()),
+                u32::from_be_bytes(body[o + 8..o + 12].try_into().unwrap()),
+            )
+        })
+        .collect();
+    if stsc.first().map(|e| e.0) != Some(1) {
+        bail!("stsc 首条 first_chunk 必须为 1");
+    }
+    Ok(StblParts { stsd, stts, ctts, stss, sample_sizes, chunk_offsets, stsc })
+}
+
+/// 按 chunk 顺序从原文件提取全部样本字节（新 mdat 净荷），并记录每个样本在新文件中的偏移。
+fn extract_samples(
+    data: &[u8],
+    parts: &StblParts,
+    new_base: u64,
+) -> anyhow::Result<(Vec<u8>, Vec<u64>)> {
+    let mut out = Vec::new();
+    let mut offsets = Vec::new();
+    let mut si = 0usize;
+    let mut ei = 0usize;
+    for (ci, &coff) in parts.chunk_offsets.iter().enumerate() {
+        let chunk_no = (ci + 1) as u32;
+        while ei + 1 < parts.stsc.len() && parts.stsc[ei + 1].0 <= chunk_no {
+            ei += 1;
+        }
+        let spc = parts.stsc[ei].1 as usize;
+        let mut pos = coff as usize;
+        for _ in 0..spc {
+            let sz = *parts
+                .sample_sizes
+                .get(si)
+                .ok_or_else(|| anyhow!("chunk 样本数超出 stsz 样本总数"))?;
+            let bytes = data
+                .get(pos..pos + sz as usize)
+                .ok_or_else(|| anyhow!("样本字节越界（偏移 {pos}，大小 {sz}）"))?;
+            offsets.push(new_base + out.len() as u64);
+            out.extend_from_slice(bytes);
+            pos += sz as usize;
+            si += 1;
+        }
+    }
+    if si != parts.sample_sizes.len() {
+        bail!("stsz 样本总数（{}）与 chunk 表样本数（{si}）不符", parts.sample_sizes.len());
+    }
+    Ok((out, offsets))
+}
+
+/// 重建 stbl：stsd/stts/ctts/stss 原样保留；stsc 简化为一样本一 chunk；
+/// stsz 写显式表；stco/co64 写新偏移。
+fn rebuild_stbl(parts: &StblParts, new_offsets: &[u64]) -> anyhow::Result<Vec<u8>> {
+    if new_offsets.len() != parts.sample_sizes.len() {
+        bail!("新偏移数与样本数不符");
+    }
+    let mut payload = Vec::new();
+    payload.extend_from_slice(parts.stsd);
+    payload.extend_from_slice(parts.stts);
+    if let Some(c) = parts.ctts {
+        payload.extend_from_slice(c);
+    }
+    if let Some(s) = parts.stss {
+        payload.extend_from_slice(s);
+    }
+    // stsc：单条目 (first_chunk=1, samples_per_chunk=1, sdi=1)
+    let mut stsc_body = vec![0u8; 4]; // version/flags
+    stsc_body.extend_from_slice(&1u32.to_be_bytes());
+    stsc_body.extend_from_slice(&1u32.to_be_bytes());
+    stsc_body.extend_from_slice(&1u32.to_be_bytes());
+    stsc_body.extend_from_slice(&1u32.to_be_bytes());
+    payload.extend(make_box(*b"stsc", &stsc_body)?);
+    // stsz：显式表
+    let mut stsz_body = vec![0u8; 4];
+    stsz_body.extend_from_slice(&0u32.to_be_bytes()); // sample_size=0 → 用表
+    stsz_body.extend_from_slice(&(parts.sample_sizes.len() as u32).to_be_bytes());
+    for &s in &parts.sample_sizes {
+        stsz_body.extend_from_slice(&s.to_be_bytes());
+    }
+    payload.extend(make_box(*b"stsz", &stsz_body)?);
+    // stco / co64（按新偏移最大值选择）
+    let wide = new_offsets.iter().any(|&o| o > u32::MAX as u64);
+    if wide {
+        let mut b = vec![0u8; 4];
+        b.extend_from_slice(&(new_offsets.len() as u32).to_be_bytes());
+        for &o in new_offsets {
+            b.extend_from_slice(&o.to_be_bytes());
+        }
+        payload.extend(make_box(*b"co64", &b)?);
+    } else {
+        let mut b = vec![0u8; 4];
+        b.extend_from_slice(&(new_offsets.len() as u32).to_be_bytes());
+        for &o in new_offsets {
+            b.extend_from_slice(&(o as u32).to_be_bytes());
+        }
+        payload.extend(make_box(*b"stco", &b)?);
+    }
+    make_box(*b"stbl", &payload)
+}
+
+fn rebuild_minf(data: &[u8], minf: &BoxInfo, parts: &StblParts, offsets: &[u64]) -> anyhow::Result<Vec<u8>> {
+    let kids = child_boxes(data, minf)?;
+    if !kids.iter().any(|k| k.0 == *b"stbl") {
+        bail!("minf 缺 stbl");
+    }
+    let mut payload = Vec::new();
+    for k in &kids {
+        if k.0 == *b"stbl" {
+            payload.extend(rebuild_stbl(parts, offsets)?);
+        } else {
+            payload.extend_from_slice(raw_box(data, k));
+        }
+    }
+    make_box(*b"minf", &payload)
+}
+
+fn rebuild_mdia(data: &[u8], mdia: &BoxInfo, parts: &StblParts, offsets: &[u64]) -> anyhow::Result<Vec<u8>> {
+    let kids = child_boxes(data, mdia)?;
+    if !kids.iter().any(|k| k.0 == *b"mdhd") || !kids.iter().any(|k| k.0 == *b"hdlr") {
+        bail!("mdia 缺 mdhd/hdlr");
+    }
+    let mut payload = Vec::new();
+    for k in &kids {
+        if k.0 == *b"minf" {
+            payload.extend(rebuild_minf(data, k, parts, offsets)?);
+        } else {
+            payload.extend_from_slice(raw_box(data, k));
+        }
+    }
+    make_box(*b"mdia", &payload)
+}
+
+fn rebuild_trak(data: &[u8], trak: &BoxInfo, parts: &StblParts, offsets: &[u64]) -> anyhow::Result<Vec<u8>> {
+    let kids = child_boxes(data, trak)?;
+    let mut payload = Vec::new();
+    for k in &kids {
+        if k.0 == *b"mdia" {
+            payload.extend(rebuild_mdia(data, k, parts, offsets)?);
+        } else {
+            // tkhd / edts 等原样保留（时长不变、编辑列表仍指向同一时间轴）
+            payload.extend_from_slice(raw_box(data, k));
+        }
+    }
+    make_box(*b"trak", &payload)
+}
+
+/// 剥除非视频轨（音轨/字幕/数据轨）：保留第一个 vide trak，按样本重建 mdat
+/// （新布局一样本一 chunk），moov 只含该 trak（mvhd/tkhd 等原样保留），
+/// 输出为天然 faststart（ftyp + moov + mdat）。
+/// 分片 MP4（mvex）、stz2、未知 stbl box、任何表不一致都返回 Err 由调用方回退。
+fn strip_audio_remux(data: &[u8]) -> anyhow::Result<Vec<u8>> {
+    let top = parse_top_boxes(data)?;
+    let moov = top
+        .iter()
+        .find(|b| b.0 == *b"moov")
+        .ok_or_else(|| anyhow!("未找到 moov box"))?;
+    let moov_kids = child_boxes(data, moov)?;
+    if moov_kids.iter().any(|k| k.0 == *b"mvex") {
+        bail!("分片 MP4（moov/mvex）不支持剥轨");
+    }
+    let traks: Vec<&BoxInfo> = moov_kids.iter().filter(|k| k.0 == *b"trak").collect();
+    if traks.is_empty() {
+        bail!("moov 内无 trak");
+    }
+    let handlers: Vec<[u8; 4]> = traks
+        .iter()
+        .map(|t| trak_handler(data, t))
+        .collect::<anyhow::Result<_>>()?;
+    let keep = handlers
+        .iter()
+        .position(|h| h == b"vide")
+        .ok_or_else(|| anyhow!("无视频轨（handlers: {:?}）", handlers))?;
+    let stbl = find_stbl(data, traks[keep])?;
+    let parts = parse_stbl(data, &stbl)?;
+    let n = parts.sample_sizes.len();
+    let ftyp = top.iter().find(|b| b.0 == *b"ftyp");
+    let ftyp_raw: &[u8] = ftyp.map(|f| raw_box(data, f)).unwrap_or(&[]);
+    // 第一遍：占位偏移算 moov 大小 → 新 mdat 净荷起始偏移
+    let build_moov = |offsets: &[u64]| -> anyhow::Result<Vec<u8>> {
+        let mut payload = Vec::new();
+        let mut ti = 0usize;
+        for k in &moov_kids {
+            if k.0 == *b"trak" {
+                if ti == keep {
+                    payload.extend(rebuild_trak(data, k, &parts, offsets)?);
+                }
+                ti += 1;
+            } else {
+                payload.extend_from_slice(raw_box(data, k));
+            }
+        }
+        make_box(*b"moov", &payload)
+    };
+    let dummy = vec![0u64; n];
+    let moov_a = build_moov(&dummy)?;
+    let mdat_payload_base = ftyp_raw.len() + moov_a.len() + 8;
+    if mdat_payload_base >= u32::MAX as usize {
+        bail!("文件过大，不支持");
+    }
+    // 第二遍：真实提取 + 偏移
+    let (payload, offsets) = extract_samples(data, &parts, mdat_payload_base as u64)?;
+    let moov_b = build_moov(&offsets)?;
+    debug_assert_eq!(moov_a.len(), moov_b.len(), "两遍 moov 大小应一致");
+    let mut out = Vec::with_capacity(ftyp_raw.len() + moov_b.len() + 8 + payload.len());
+    out.extend_from_slice(ftyp_raw);
+    out.extend_from_slice(&moov_b);
+    out.extend(make_box(*b"mdat", &payload)?);
+    Ok(out)
+}
+
 /// 当前 unix 毫秒时间戳（与热更 json 版本号同源，用作视频文件名后缀）。
 fn unix_now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -1678,32 +2110,55 @@ struct VideoDeploy {
     name: String,
     remuxed: bool,
     fallback: bool,
+    /// 音轨剥除成功时的（剥前字节, 剥后字节）。
+    stripped: Option<(u64, u64)>,
+    /// 检测到非视频轨但剥除失败。
+    strip_failed: bool,
     cleanup_blocked: bool,
     bytes: u64,
 }
 
 /// 部署视频字节到版本化文件名 kimi-wallpaper-video-<毫秒时间戳>.mp4（同毫秒冲突自增）：
-/// 不覆盖正在播放的旧文件，成功后惰性清理其余版本；faststart 检测/重封装失败时
-/// 回退原样字节（fallback=true）。写入失败返回 Err，由调用方决定保留现状。
+/// 不覆盖正在播放的旧文件，成功后惰性清理其余版本。
+/// 流程：有非视频轨先 strip_audio_remux（失败回退原数据）→ faststart 检测/重封装
+/// （strip 产物天然通过；失败回退原样字节 fallback=true）。写入失败返回 Err。
 fn deploy_video_file(src: &Path, dist: &Path) -> anyhow::Result<VideoDeploy> {
     let data = fs::read(src).with_context(|| format!("读取视频失败: {}", src.display()))?;
+    // 1) 剥除非视频轨（探针 muted 播放，音轨/字幕/数据轨纯属浪费）
+    let mut stripped: Option<(u64, u64)> = None;
+    let mut strip_failed = false;
+    let mut cur = data;
+    if let Ok(handlers) = mp4_track_handlers(&cur) {
+        if handlers.iter().any(|h| h != b"vide") {
+            let before = cur.len() as u64;
+            match strip_audio_remux(&cur) {
+                Ok(v) => {
+                    let after = v.len() as u64;
+                    stripped = Some((before, after));
+                    cur = v;
+                }
+                Err(_) => strip_failed = true,
+            }
+        }
+    }
+    // 2) faststart 检测（剥轨产物布局为 ftyp+moov+mdat，天然通过）
     let mut remuxed = false;
     let mut fallback = false;
-    let out = match mp4_moov_before_mdat(&data) {
-        Ok(true) => data,
-        Ok(false) => match faststart_remux(&data) {
+    let out = match mp4_moov_before_mdat(&cur) {
+        Ok(true) => cur,
+        Ok(false) => match faststart_remux(&cur) {
             Ok(v) => {
                 remuxed = true;
                 v
             }
             Err(_) => {
                 fallback = true;
-                data
+                cur
             }
         },
         Err(_) => {
             fallback = true;
-            data
+            cur
         }
     };
     let mut stamp = unix_now_ms();
@@ -1718,7 +2173,15 @@ fn deploy_video_file(src: &Path, dist: &Path) -> anyhow::Result<VideoDeploy> {
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     let cleanup_blocked = cleanup_old_video_files(dist, Some(&name));
-    Ok(VideoDeploy { name, remuxed, fallback, cleanup_blocked, bytes: out.len() as u64 })
+    Ok(VideoDeploy {
+        name,
+        remuxed,
+        fallback,
+        stripped,
+        strip_failed,
+        cleanup_blocked,
+        bytes: out.len() as u64,
+    })
 }
 
 // ---------- 图片处理 ----------
@@ -2798,7 +3261,7 @@ light.crop=,,
         v
     }
 
-    /// 造 moov>trak>mdia>minf>stbl>stco/co64 嵌套结构，entries 为 chunk 偏移。
+    /// 造 moov>trak>mdia(mdhd+hdlr vide)>minf>stbl>stco/co64 嵌套结构，entries 为 chunk 偏移。
     fn toy_moov(wide: bool, entries: &[u64]) -> Vec<u8> {
         let mut stco_payload = vec![0u8; 4]; // version/flags
         stco_payload.extend_from_slice(&(entries.len() as u32).to_be_bytes());
@@ -2812,7 +3275,11 @@ light.crop=,,
         let leaf_typ: &[u8; 4] = if wide { b"co64" } else { b"stco" };
         let stbl = bx(b"stbl", &bx(leaf_typ, &stco_payload));
         let minf = bx(b"minf", &stbl);
-        let mdia = bx(b"mdia", &minf);
+        // hdlr payload：version/flags(4) + pre_defined(4) + handler(4) + reserved(12)
+        let mut hdlr_payload = vec![0u8; 8];
+        hdlr_payload.extend_from_slice(b"vide");
+        hdlr_payload.extend_from_slice(&[0u8; 12]);
+        let mdia = bx(b"mdia", &[bx(b"mdhd", &[0u8; 24]).as_slice(), bx(b"hdlr", &hdlr_payload).as_slice(), &minf].concat());
         let trak = bx(b"trak", &mdia);
         bx(b"moov", &trak)
     }
@@ -3017,5 +3484,330 @@ light.crop=,,
         fs::write(hot_json_path(&dist), r#"{"v":2,"video":null}"#).unwrap();
         assert!(current_video_from_json(&dist).is_none());
         assert!(current_video_from_json(&dir.join("no-such-dir")).is_none());
+    }
+
+    // ---- 音轨剥除测试的玩具构造 ----
+
+    /// 玩具轨道：handler + chunk 列表（chunk = 若干样本字节）+ 可选 ctts/stss/stz2。
+    struct ToyTrack {
+        handler: [u8; 4],
+        chunks: Vec<Vec<Vec<u8>>>,
+        with_ctts: bool,
+        with_stss: bool,
+        use_stz2: bool,
+    }
+
+    impl ToyTrack {
+        fn samples(&self) -> Vec<Vec<u8>> {
+            self.chunks.iter().flatten().cloned().collect()
+        }
+    }
+
+    /// stts full box（玩具与断言共用，保证可比对）。
+    fn stts_box(n: u32, delta: u32) -> Vec<u8> {
+        let mut body = vec![0u8; 4];
+        body.extend_from_slice(&1u32.to_be_bytes());
+        body.extend_from_slice(&n.to_be_bytes());
+        body.extend_from_slice(&delta.to_be_bytes());
+        bx(b"stts", &body)
+    }
+
+    fn ctts_box(n: u32, off: u32) -> Vec<u8> {
+        let mut body = vec![0u8; 4];
+        body.extend_from_slice(&1u32.to_be_bytes());
+        body.extend_from_slice(&n.to_be_bytes());
+        body.extend_from_slice(&off.to_be_bytes());
+        bx(b"ctts", &body)
+    }
+
+    fn stss_box(first: u32) -> Vec<u8> {
+        let mut body = vec![0u8; 4];
+        body.extend_from_slice(&1u32.to_be_bytes());
+        body.extend_from_slice(&first.to_be_bytes());
+        bx(b"stss", &body)
+    }
+
+    /// 造完整 trak（tkhd+mdia(mdhd+hdlr+minf(媒体头+dinf+stbl))），stco 用给定偏移。
+    fn toy_full_trak(t: &ToyTrack, chunk_offsets: &[u64]) -> Vec<u8> {
+        let tkhd = bx(b"tkhd", &[0u8; 84]);
+        let mdhd = bx(b"mdhd", &[0u8; 24]);
+        let mut hdlr_payload = vec![0u8; 8];
+        hdlr_payload.extend_from_slice(&t.handler);
+        hdlr_payload.extend_from_slice(&[0u8; 12]);
+        let hdlr = bx(b"hdlr", &hdlr_payload);
+        let media_header = if t.handler == *b"vide" {
+            bx(b"vmhd", &[0u8; 12])
+        } else {
+            bx(b"smhd", &[0u8; 8])
+        };
+        let dref = bx(b"dref", &[&[0u8; 4], &1u32.to_be_bytes(), &bx(b"url ", &[0, 0, 0, 1])[..]].concat());
+        let dinf = bx(b"dinf", &dref);
+        // stbl
+        let codec: &[u8; 4] = if t.handler == *b"vide" { b"avc1" } else { b"mp4a" };
+        let stsd = bx(
+            b"stsd",
+            &[&[0u8; 4], &1u32.to_be_bytes(), &bx(codec, &[0u8; 12])[..]].concat(),
+        );
+        let n_samples = t.samples().len() as u32;
+        let stts = stts_box(n_samples, 100);
+        let mut stbl_payload = Vec::new();
+        stbl_payload.extend_from_slice(&stsd);
+        stbl_payload.extend_from_slice(&stts);
+        if t.with_ctts {
+            stbl_payload.extend_from_slice(&ctts_box(n_samples, 5));
+        }
+        if t.with_stss {
+            stbl_payload.extend_from_slice(&stss_box(1));
+        }
+        // stsc：每个 chunk 一条目（first_chunk=i+1, spc=chunk 样本数, sdi=1）
+        let mut stsc_body = vec![0u8; 4];
+        stsc_body.extend_from_slice(&(t.chunks.len() as u32).to_be_bytes());
+        for (i, c) in t.chunks.iter().enumerate() {
+            stsc_body.extend_from_slice(&((i + 1) as u32).to_be_bytes());
+            stsc_body.extend_from_slice(&(c.len() as u32).to_be_bytes());
+            stsc_body.extend_from_slice(&1u32.to_be_bytes());
+        }
+        stbl_payload.extend_from_slice(&bx(b"stsc", &stsc_body));
+        // stsz / stz2
+        let sizes: Vec<u32> = t.samples().iter().map(|s| s.len() as u32).collect();
+        if t.use_stz2 {
+            stbl_payload.extend_from_slice(&bx(b"stz2", &[0u8; 12]));
+        } else {
+            let mut stsz_body = vec![0u8; 4];
+            stsz_body.extend_from_slice(&0u32.to_be_bytes());
+            stsz_body.extend_from_slice(&(sizes.len() as u32).to_be_bytes());
+            for &s in &sizes {
+                stsz_body.extend_from_slice(&s.to_be_bytes());
+            }
+            stbl_payload.extend_from_slice(&bx(b"stsz", &stsz_body));
+        }
+        // stco
+        let mut stco_body = vec![0u8; 4];
+        stco_body.extend_from_slice(&(chunk_offsets.len() as u32).to_be_bytes());
+        for &o in chunk_offsets {
+            stco_body.extend_from_slice(&(o as u32).to_be_bytes());
+        }
+        stbl_payload.extend_from_slice(&bx(b"stco", &stco_body));
+        let stbl = bx(b"stbl", &stbl_payload);
+        let minf = bx(b"minf", &[&media_header[..], &dinf[..], &stbl[..]].concat());
+        let mdia = bx(b"mdia", &[&mdhd[..], &hdlr[..], &minf[..]].concat());
+        bx(b"trak", &[&tkhd[..], &mdia[..]].concat())
+    }
+
+    /// 组装 ftyp+mdat+moov（moov 故意在 mdat 后）的双轨交错玩具文件：
+    /// chunk 交错顺序 V0 A0 V1 A1...，返回 (文件, 每轨 chunk 偏移)。
+    fn build_interleaved_mp4(tracks: &[ToyTrack]) -> (Vec<u8>, Vec<Vec<u64>>) {
+        // 交错计划
+        let mut plan: Vec<(usize, usize)> = Vec::new();
+        let max_chunks = tracks.iter().map(|t| t.chunks.len()).max().unwrap_or(0);
+        for ci in 0..max_chunks {
+            for (ti, t) in tracks.iter().enumerate() {
+                if ci < t.chunks.len() {
+                    plan.push((ti, ci));
+                }
+            }
+        }
+        let ftyp = bx(b"ftyp", b"isom0000");
+        let payload_len: usize = plan
+            .iter()
+            .flat_map(|&(ti, ci)| tracks[ti].chunks[ci].iter())
+            .map(|s| s.len())
+            .sum();
+        let mdat_payload_base = ftyp.len() + 8;
+        let mut offsets: Vec<Vec<u64>> = vec![Vec::new(); tracks.len()];
+        let mut pos = mdat_payload_base as u64;
+        for &(ti, ci) in &plan {
+            offsets[ti].push(pos);
+            pos += tracks[ti].chunks[ci].iter().map(|s| s.len() as u64).sum::<u64>();
+        }
+        let mdat_payload: Vec<u8> = plan
+            .iter()
+            .flat_map(|&(ti, ci)| tracks[ti].chunks[ci].iter())
+            .flatten()
+            .cloned()
+            .collect();
+        assert_eq!(mdat_payload.len(), payload_len);
+        let mut file = ftyp.clone();
+        file.extend_from_slice(&bx(b"mdat", &mdat_payload));
+        let mut moov_payload = bx(b"mvhd", &[0u8; 100]);
+        for (t, offs) in tracks.iter().zip(&offsets) {
+            moov_payload.extend_from_slice(&toy_full_trak(t, offs));
+        }
+        file.extend_from_slice(&bx(b"moov", &moov_payload));
+        (file, offsets)
+    }
+
+    /// 从输出文件按新 stco 读取样本字节（一样本一 chunk）。
+    fn read_samples_by_stco(mp4: &[u8], sizes: &[u32]) -> Vec<Vec<u8>> {
+        let entries = read_chunk_entries(mp4, false);
+        assert_eq!(entries.len(), sizes.len());
+        sizes
+            .iter()
+            .zip(entries)
+            .map(|(&sz, off)| mp4[off as usize..off as usize + sz as usize].to_vec())
+            .collect()
+    }
+
+    #[test]
+    fn test_track_handlers_detection() {
+        let video = ToyTrack {
+            handler: *b"vide",
+            chunks: vec![vec![vec![0xA1u8; 10]]],
+            with_ctts: false,
+            with_stss: false,
+            use_stz2: false,
+        };
+        let audio = ToyTrack {
+            handler: *b"soun",
+            chunks: vec![vec![vec![0xC1u8; 7]]],
+            with_ctts: false,
+            with_stss: false,
+            use_stz2: false,
+        };
+        let (single, _) = build_interleaved_mp4(&[video]);
+        assert_eq!(mp4_track_handlers(&single).unwrap(), vec![*b"vide"]);
+        let video = ToyTrack {
+            handler: *b"vide",
+            chunks: vec![vec![vec![0xA1u8; 10]]],
+            with_ctts: false,
+            with_stss: false,
+            use_stz2: false,
+        };
+        let (dual, _) = build_interleaved_mp4(&[video, audio]);
+        assert_eq!(mp4_track_handlers(&dual).unwrap(), vec![*b"vide", *b"soun"]);
+        assert!(mp4_track_handlers(b"not mp4 at all").is_err());
+    }
+
+    #[test]
+    fn test_strip_audio_basic() {
+        let video = ToyTrack {
+            handler: *b"vide",
+            // 2 chunk：{v1} {v2,v3}，与音轨交错
+            chunks: vec![vec![vec![0xA1u8; 10]], vec![vec![0xB1u8; 20], vec![0xB2u8; 12]]],
+            with_ctts: true,
+            with_stss: true,
+            use_stz2: false,
+        };
+        let audio = ToyTrack {
+            handler: *b"soun",
+            chunks: vec![vec![vec![0xC1u8; 15]], vec![vec![0xD1u8; 8], vec![0xD2u8; 8]]],
+            with_ctts: false,
+            with_stss: false,
+            use_stz2: false,
+        };
+        let (src, _offs) = build_interleaved_mp4(&[video, audio]);
+
+        let out = strip_audio_remux(&src).unwrap();
+        // 只剩 video 轨
+        assert_eq!(mp4_track_handlers(&out).unwrap(), vec![*b"vide"]);
+        // 输出天然 faststart
+        assert!(mp4_moov_before_mdat(&out).unwrap(), "输出应为 ftyp+moov+mdat");
+        // mdat 净荷 = 视频样本按序拼接（音轨样本被剥掉）
+        let expected_payload: Vec<u8> = [vec![0xA1u8; 10], vec![0xB1u8; 20], vec![0xB2u8; 12]].concat();
+        assert_eq!(read_mdat_payload(&out), expected_payload, "mdat 应只含视频样本");
+        // stco 指向正确：按新偏移能读回全部视频样本
+        let sizes = [10u32, 20, 12];
+        let samples = read_samples_by_stco(&out, &sizes);
+        assert_eq!(samples, vec![vec![0xA1u8; 10], vec![0xB1u8; 20], vec![0xB2u8; 12]]);
+        // stts/ctts/stss 原样保留（字节级一致）
+        assert!(find_subslice(&out, &stts_box(3, 100)).is_some(), "stts 应原样保留");
+        assert!(find_subslice(&out, &ctts_box(3, 5)).is_some(), "ctts 应原样保留");
+        assert!(find_subslice(&out, &stss_box(1)).is_some(), "stss 应原样保留");
+        // stsc 简化为一样本一 chunk：单条目 (1,1,1)
+        let pos = find_subslice(&out, b"stsc").unwrap();
+        assert_eq!(u32::from_be_bytes(out[pos + 8..pos + 12].try_into().unwrap()), 1, "新 stsc 应只有 1 条");
+        assert_eq!(u32::from_be_bytes(out[pos + 12..pos + 16].try_into().unwrap()), 1);
+        assert_eq!(u32::from_be_bytes(out[pos + 16..pos + 20].try_into().unwrap()), 1);
+    }
+
+    #[test]
+    fn test_strip_no_audio_goes_original_path() {
+        let video = ToyTrack {
+            handler: *b"vide",
+            chunks: vec![vec![vec![0xA1u8; 10], vec![0xA2u8; 10]]],
+            with_ctts: false,
+            with_stss: false,
+            use_stz2: false,
+        };
+        let (src, _) = build_interleaved_mp4(&[video]);
+        let handlers = mp4_track_handlers(&src).unwrap();
+        // 调用方判定：无非视频轨 → 不做剥除重建（走原 faststart 路径，字节级不变或仅搬移）
+        assert!(!handlers.iter().any(|h| h != b"vide"));
+    }
+
+    #[test]
+    fn test_strip_errors() {
+        // 垃圾/无 moov
+        assert!(strip_audio_remux(b"this is not an mp4 file at all").is_err());
+        // 分片 MP4（mvex）
+        let frag = [bx(b"ftyp", b"isom0000"), bx(b"moov", &bx(b"mvex", &[]))].concat();
+        assert!(strip_audio_remux(&frag).is_err(), "分片 MP4 应回退");
+        // stz2
+        let video = ToyTrack {
+            handler: *b"vide",
+            chunks: vec![vec![vec![0xA1u8; 10]]],
+            with_ctts: false,
+            with_stss: false,
+            use_stz2: true,
+        };
+        let audio = ToyTrack {
+            handler: *b"soun",
+            chunks: vec![vec![vec![0xC1u8; 7]]],
+            with_ctts: false,
+            with_stss: false,
+            use_stz2: false,
+        };
+        let (src, _) = build_interleaved_mp4(&[video, audio]);
+        assert!(strip_audio_remux(&src).is_err(), "stz2 应回退");
+    }
+
+    #[test]
+    fn test_deploy_video_strips_audio() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("test-fixture").join("video-deploy-strip");
+        let _ = fs::remove_dir_all(&dir);
+        let dist = dir.join("dist");
+        fs::create_dir_all(&dist).unwrap();
+        let video = ToyTrack {
+            handler: *b"vide",
+            chunks: vec![vec![vec![0xA1u8; 10]], vec![vec![0xB1u8; 20], vec![0xB2u8; 12]]],
+            with_ctts: false,
+            with_stss: false,
+            use_stz2: false,
+        };
+        let audio = ToyTrack {
+            handler: *b"soun",
+            chunks: vec![vec![vec![0xC1u8; 15]]],
+            with_ctts: false,
+            with_stss: false,
+            use_stz2: false,
+        };
+        let (src_bytes, _) = build_interleaved_mp4(&[video, audio]);
+        let src = dir.join("src.mp4");
+        fs::write(&src, &src_bytes).unwrap();
+
+        let d = deploy_video_file(&src, &dist).unwrap();
+        assert!(d.stripped.is_some(), "双轨视频应触发剥轨");
+        assert!(!d.strip_failed && !d.fallback);
+        assert!(d.stripped.unwrap().0 > d.stripped.unwrap().1, "剥后应更小");
+        let out = fs::read(dist.join(&d.name)).unwrap();
+        assert_eq!(mp4_track_handlers(&out).unwrap(), vec![*b"vide"]);
+        assert!(mp4_moov_before_mdat(&out).unwrap());
+        assert_eq!(
+            read_mdat_payload(&out),
+            [vec![0xA1u8; 10], vec![0xB1u8; 20], vec![0xB2u8; 12]].concat()
+        );
+
+        // 无音轨视频（toy_moov 单 video trak，带 hdlr）→ 不剥除
+        let dir2 = dir.join("no-audio");
+        let dist2 = dir2.join("dist");
+        fs::create_dir_all(&dist2).unwrap();
+        let mut plain = bx(b"ftyp", b"isom0000");
+        plain.extend_from_slice(&toy_moov(false, &[1000, 2000]));
+        plain.extend_from_slice(&bx(b"mdat", &[0xEEu8; 64]));
+        let src2 = dir2.join("src.mp4");
+        fs::write(&src2, &plain).unwrap();
+        assert_eq!(mp4_track_handlers(&plain).unwrap(), vec![*b"vide"]);
+        let d2 = deploy_video_file(&src2, &dist2).unwrap();
+        assert!(d2.stripped.is_none(), "单视频轨不应触发剥除");
     }
 }

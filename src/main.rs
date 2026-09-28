@@ -158,6 +158,47 @@ html[data-color-scheme=system] .chat-dock:before{opacity:.45 !important}
 }
 "#;
 
+/// 还原反向补丁：运行中的 Kimi Code 启动时已把带补丁的主样式表读进内存，磁盘还原删不掉内存里的
+/// 规则，只能靠热更层以「同选择器 + 原版值 + !important」覆盖回去（探针 style 元素在 head 末尾，
+/// 同特异性同 !important 时后写者赢）。原版值全部实测自主样式表备份，且都是主题变量引用，
+/// 自动跟随 dark/light/system，无需按主题写死颜色。选择器与补丁模板逐条对应（特异性 ≥ 补丁，
+/// 如 .global-preview .file-preview 必须用最长限定）。
+const RESTORE_TEMPLATE: &str = r#"/* === kimi-wallpaper-restore-patch === */
+html[data-color-scheme=dark]{background:none !important}
+html[data-color-scheme=dark] .sidebar-actions,html[data-color-scheme=dark] .side-footer,html[data-color-scheme=dark] .side,html[data-color-scheme=dark] .windows-titlebar{background:var(--color-sidebar-bg) !important}
+html[data-color-scheme=dark] .app,html[data-color-scheme=dark] .con,html[data-color-scheme=dark] .sc,html[data-color-scheme=dark] .global-preview,html[data-color-scheme=dark] .global-preview .file-preview{background:var(--bg) !important}
+html[data-color-scheme=dark] .global-preview .fp-body,html[data-color-scheme=dark] .global-preview .ui-panel-header{background:transparent !important}
+html[data-color-scheme=dark] .agent-panel,html[data-color-scheme=dark] .chat-header{background:var(--color-bg) !important}
+html[data-color-scheme=dark] .topbar{background:var(--color-topbar-bg-frost) !important}
+html[data-color-scheme=dark] .chat-dock:before{opacity:1 !important}
+@media (prefers-color-scheme:dark){
+html[data-color-scheme=system]{background:none !important}
+html[data-color-scheme=system] .sidebar-actions,html[data-color-scheme=system] .side-footer,html[data-color-scheme=system] .side,html[data-color-scheme=system] .windows-titlebar{background:var(--color-sidebar-bg) !important}
+html[data-color-scheme=system] .app,html[data-color-scheme=system] .con,html[data-color-scheme=system] .sc,html[data-color-scheme=system] .global-preview,html[data-color-scheme=system] .global-preview .file-preview{background:var(--bg) !important}
+html[data-color-scheme=system] .global-preview .fp-body,html[data-color-scheme=system] .global-preview .ui-panel-header{background:transparent !important}
+html[data-color-scheme=system] .agent-panel,html[data-color-scheme=system] .chat-header{background:var(--color-bg) !important}
+html[data-color-scheme=system] .topbar{background:var(--color-topbar-bg-frost) !important}
+html[data-color-scheme=system] .chat-dock:before{opacity:1 !important}
+}
+html[data-color-scheme=light]{background:none !important}
+html[data-color-scheme=light] .sidebar-actions,html[data-color-scheme=light] .side-footer,html[data-color-scheme=light] .side,html[data-color-scheme=light] .windows-titlebar{background:var(--color-sidebar-bg) !important}
+html[data-color-scheme=light] .app,html[data-color-scheme=light] .con,html[data-color-scheme=light] .sc,html[data-color-scheme=light] .global-preview,html[data-color-scheme=light] .global-preview .file-preview{background:var(--bg) !important}
+html[data-color-scheme=light] .global-preview .fp-body,html[data-color-scheme=light] .global-preview .ui-panel-header{background:transparent !important}
+html[data-color-scheme=light] .agent-panel,html[data-color-scheme=light] .chat-header{background:var(--color-bg) !important}
+html[data-color-scheme=light] .topbar{background:var(--color-topbar-bg-frost) !important}
+html[data-color-scheme=light] .chat-dock:before{opacity:1 !important}
+@media (prefers-color-scheme:light){
+html[data-color-scheme=system]{background:none !important}
+html[data-color-scheme=system] .sidebar-actions,html[data-color-scheme=system] .side-footer,html[data-color-scheme=system] .side,html[data-color-scheme=system] .windows-titlebar{background:var(--color-sidebar-bg) !important}
+html[data-color-scheme=system] .app,html[data-color-scheme=system] .con,html[data-color-scheme=system] .sc,html[data-color-scheme=system] .global-preview,html[data-color-scheme=system] .global-preview .file-preview{background:var(--bg) !important}
+html[data-color-scheme=system] .global-preview .fp-body,html[data-color-scheme=system] .global-preview .ui-panel-header{background:transparent !important}
+html[data-color-scheme=system] .agent-panel,html[data-color-scheme=system] .chat-header{background:var(--color-bg) !important}
+html[data-color-scheme=system] .topbar{background:var(--color-topbar-bg-frost) !important}
+html[data-color-scheme=system] .chat-dock:before{opacity:1 !important}
+}
+{FONTS}
+"#;
+
 /// 界面字体覆盖：Kimi Code 全界面字体走 :root 的 --font-ui / --font-mono 两个变量，
 /// 改这两个变量即改全界面；--sans/--font-display/--markdown-font-family 等别名一并指向它们。
 /// 用 :root:root 提高特异性（全应用样式表 font-family !important 数量为 0，追加在末尾即可覆盖）。
@@ -996,10 +1037,16 @@ impl BgToolApp {
             Ok(css) => {
                 self.log_push(&format!("已从备份还原: {}", css.display()));
                 let dist = root.join("resources").join("desktop-dist");
-                match write_hot_files(&dist, "", None) {
+                // 运行中的应用启动时已把带补丁的主样式表读进内存，磁盘还原删不掉内存里的规则；
+                // 推送反向补丁按原版值覆盖回去，运行中的 Kimi Code 免重启恢复原版外观
+                let font_vars = extract_original_font_vars(&dist.join("assets"));
+                let counter = build_restore_patch(&font_vars);
+                match write_hot_files(&dist, &counter, None) {
                     Ok(_) => {
                         if self.hot_enabled {
-                            self.log_push("热更新已推送：运行中的 Kimi Code 约 2 秒内自动生效，无需重启");
+                            self.log_push(
+                                "反向补丁已推送：运行中的 Kimi Code 约 2 秒恢复原版外观，无需重启",
+                            );
                         } else {
                             self.log_push("需重启 Kimi Code 生效（或点「安装热更新」，之后无需重启）");
                         }
@@ -1600,6 +1647,67 @@ fn build_font_block<'a>(
         out.push_str(&s);
     }
     Some(out)
+}
+
+/// 字体补丁可能覆盖的 CSS 变量（名字/文件两种模式的并集）。
+const FONT_VAR_NAMES: [&str; 8] = [
+    "--font-ui-latin",
+    "--font-ui",
+    "--sans",
+    "--font-display",
+    "--markdown-font-family",
+    "--font-mono",
+    "--mono",
+    "--markdown-code-font-family",
+];
+
+/// 组装还原反向补丁：RESTORE_TEMPLATE + 字体变量反向块（font_vars 为空则不产出字体块）。
+fn build_restore_patch(font_vars: &[(String, String)]) -> String {
+    let fonts = if font_vars.is_empty() {
+        String::new()
+    } else {
+        let body: Vec<String> = font_vars
+            .iter()
+            .map(|(k, v)| format!("{k}:{v} !important"))
+            .collect();
+        format!("/* 字体还原 */\n:root:root{{{}}}\n", body.join(";"))
+    };
+    RESTORE_TEMPLATE.replace("{FONTS}", &fonts)
+}
+
+/// 从 assets/*.css 提取字体变量的原版定义（这些文件从不打补丁，即原版来源）。
+/// 必须在 restore_patch 之后调用（此时主样式表已是纯净备份，不会误提补丁里的覆盖值）。
+/// 提取不到的变量跳过——残留覆盖无害：主变量 --font-ui/--font-mono 还原后，孤立的别名无人引用。
+fn extract_original_font_vars(assets_dir: &Path) -> Vec<(String, String)> {
+    let mut files: Vec<PathBuf> = match fs::read_dir(assets_dir) {
+        Ok(rd) => rd
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "css"))
+            .collect(),
+        Err(_) => return Vec::new(),
+    };
+    files.sort();
+    let mut out: Vec<(String, String)> = Vec::new();
+    for name in FONT_VAR_NAMES {
+        let Ok(re) = regex::Regex::new(&format!(r"{}\s*:\s*([^;}}]+)", regex::escape(name)))
+        else {
+            continue;
+        };
+        for f in &files {
+            let Ok(css) = fs::read_to_string(f) else {
+                continue;
+            };
+            if let Some(c) = re.captures(&css) {
+                let v = c.get(1).unwrap().as_str().trim();
+                if !v.is_empty() {
+                    out.push((name.to_string(), v.to_string()));
+                    break;
+                }
+            }
+        }
+    }
+    out
 }
 
 /// 组装补丁：dark/light 图片透明化块（各自可选）→ 字体块（可选）→ 结束标记。
@@ -3862,6 +3970,81 @@ light.crop=,,
         assert_eq!(css.matches(PATCH_HEADER).count(), 1);
         apply_patch(&root, None).unwrap();
         assert_eq!(fs::read_to_string(&css_path).unwrap(), ORIG_CSS, "移除补丁后应还原原版");
+    }
+
+    #[test]
+    fn test_build_restore_patch() {
+        let patch = build_restore_patch(&[]);
+        // 4 镜像齐全（dark/light × scheme/system），与补丁模板逐条对应
+        assert_eq!(patch.matches("background:none !important").count(), 4, "html 背景反向应 ×4");
+        assert_eq!(
+            patch.matches("background:var(--color-sidebar-bg) !important").count(),
+            4,
+            "侧边栏组（.side/.windows-titlebar/.sidebar-actions/.side-footer）反向应 ×4"
+        );
+        assert_eq!(patch.matches("background:var(--bg) !important").count(), 4, ".app/.con/.sc/.global-preview/.file-preview 组反向应 ×4");
+        assert_eq!(patch.matches("background:var(--color-bg) !important").count(), 4, ".agent-panel/.chat-header 组反向应 ×4");
+        assert_eq!(patch.matches("background:var(--color-topbar-bg-frost) !important").count(), 4, ".topbar 反向应 ×4");
+        assert_eq!(patch.matches("background:transparent !important").count(), 4, ".fp-body/.ui-panel-header 反向应 ×4");
+        assert_eq!(patch.matches("opacity:1 !important").count(), 4, ".chat-dock:before 反向应 ×4");
+        assert_eq!(patch.matches("@media (prefers-color-scheme:dark)").count(), 1);
+        assert_eq!(patch.matches("@media (prefers-color-scheme:light)").count(), 1);
+        // 长限定：特异性必须 ≥ 图片补丁的 html[...] .global-preview .file-preview 组，否则盖不过
+        assert!(patch.contains("html[data-color-scheme=dark] .global-preview .file-preview"));
+        assert!(patch.contains("html[data-color-scheme=light] .global-preview .ui-panel-header"));
+        assert!(patch.contains("html[data-color-scheme=system] .global-preview .fp-body"));
+        // 补丁里改过的每个选择器都应有对应反向规则
+        for sel in [
+            ".sidebar-actions", ".side-footer", ".side,", ".windows-titlebar",
+            ".app,", ".con,", ".sc,", ".global-preview,", ".agent-panel",
+            ".chat-header", ".topbar", ".chat-dock:before",
+        ] {
+            assert!(patch.contains(sel), "反向补丁缺 {sel}");
+        }
+        assert!(!patch.contains("{FONTS}"), "占位符应被替换");
+        assert!(!patch.contains(":root:root"), "无字体变量时不应产出字体反向块");
+
+        // 带字体变量：产出字体反向块
+        let with_fonts = build_restore_patch(&[
+            ("--font-ui".to_string(), "\"A Font\",sans-serif".to_string()),
+            ("--font-mono".to_string(), "Consolas,monospace".to_string()),
+        ]);
+        assert!(with_fonts.contains(
+            ":root:root{--font-ui:\"A Font\",sans-serif !important;--font-mono:Consolas,monospace !important}"
+        ));
+    }
+
+    #[test]
+    fn test_extract_original_font_vars() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("test-fixture")
+            .join("font-var-extract");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("style-x.css"),
+            ":root{--font-ui:\"A Font\",sans-serif;--font-mono:\"M Font\",monospace;--color-bg:#fff}",
+        )
+        .unwrap();
+        // 末条声明无分号（以 } 结尾）也要能提取；垃圾内容与同名前缀变量不得干扰
+        fs::write(dir.join("other.css"), ".x{--sans-serif:bad}.y{--sans:\"S Font\"}").unwrap();
+        fs::write(dir.join("broken.css"), "not css at all {{{").unwrap();
+        fs::write(dir.join("notcss.txt"), "--font-ui:\"WRONG\"").unwrap();
+
+        let vars = extract_original_font_vars(&dir);
+        assert_eq!(
+            vars,
+            vec![
+                ("--font-ui".to_string(), "\"A Font\",sans-serif".to_string()),
+                ("--sans".to_string(), "\"S Font\"".to_string()),
+                ("--font-mono".to_string(), "\"M Font\",monospace".to_string()),
+            ],
+            "应提取已定义变量、跳过未定义变量、不扫描非 css 文件，顺序按 FONT_VAR_NAMES"
+        );
+
+        // 不存在的目录 → 空
+        assert!(extract_original_font_vars(&dir.join("nope")).is_empty());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     // ---------- 字体覆盖 ----------

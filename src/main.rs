@@ -21,7 +21,12 @@ const HOOK_VERSION_MARK: &str = "<!-- version: v3 -->";
 /// 视频文件名前缀：实际部署为版本化文件名 kimi-wallpaper-video-<毫秒时间戳>.mp4。
 /// 不用固定名是因为 Windows 不允许写入被播放实例占用的文件，换视频会部署失败。
 const VIDEO_FILE_PREFIX: &str = "kimi-wallpaper-video";
+/// 导入字体文件的部署前缀：版本化文件名 kimi-wallpaper-font-{ui|mono}-<毫秒时间戳>.<ext>。
+/// 版本化原因同视频：Windows 不允许写入被占用的文件，固定名覆盖会部署失败。
+const FONT_UI_FILE_PREFIX: &str = "kimi-wallpaper-font-ui";
+const FONT_MONO_FILE_PREFIX: &str = "kimi-wallpaper-font-mono";
 const GIF_WARN_BYTES: usize = 3 * 512 * 1024; // 1.5MB
+const FONT_FILE_WARN_BYTES: usize = 8 * 1024 * 1024; // 8MB
 
 const HOT_HOOK_BLOCK: &str = r#"    <!-- === kimi-wallpaper-hot-hook === -->
     <!-- version: v3 -->
@@ -162,6 +167,19 @@ const FONT_UI_TEMPLATE: &str = r#":root:root{--font-ui-latin:"{FONT_UI}","Helvet
 "#;
 
 const FONT_MONO_TEMPLATE: &str = r#":root:root{--font-mono:"{FONT_MONO}","JetBrains Mono Variable","JetBrains Mono",ui-monospace,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;--mono:var(--font-mono);--markdown-code-font-family:var(--font-mono)}
+"#;
+
+/// 导入字体文件的界面字体覆盖（方案 A）：@font-face 引用部署到 desktop-dist 的版本化字体文件。
+/// 自定义字体直接进 --font-ui 首位（导入的可能是 CJK 字体，不能进 --font-ui-latin 只对拉丁生效），
+/// 别名照旧。url 必须绝对路径（相对路径在 /sessions/<id> 路由下会 404 静默失效）；
+/// font-display:swap 避免字体加载期间文字不可见。family 用固定内部名，不与系统字体名冲突。
+const FONT_FACE_UI_TEMPLATE: &str = r#"@font-face{font-family:"KimiFontUI";src:url(/{FILE}) format("{FORMAT}");font-display:swap}
+:root:root{--font-ui:"KimiFontUI","Noto Sans SC Variable","Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Source Han Sans SC",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Ubuntu,sans-serif,"Apple Color Emoji","Segoe UI Emoji","Segoe UI Symbol","Noto Color Emoji";--sans:var(--font-ui);--font-display:var(--font-ui);--markdown-font-family:var(--font-ui)}
+"#;
+
+/// 导入字体文件的代码字体覆盖：同界面字体，进 --font-mono 首位。
+const FONT_FACE_MONO_TEMPLATE: &str = r#"@font-face{font-family:"KimiFontMono";src:url(/{FILE}) format("{FORMAT}");font-display:swap}
+:root:root{--font-mono:"KimiFontMono","JetBrains Mono Variable","JetBrains Mono",ui-monospace,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;--mono:var(--font-mono);--markdown-code-font-family:var(--font-mono)}
 "#;
 
 // ---------- 数据结构 ----------
@@ -334,6 +352,9 @@ struct SettingsSnapshot {
     video_path: Option<PathBuf>,
     font_ui: String,
     font_mono: String,
+    /// 导入的界面/代码字体文件（方案 A 文件模式，优先于字体名）；None 为名字模式。
+    font_ui_file: Option<PathBuf>,
+    font_mono_file: Option<PathBuf>,
 }
 
 impl Default for SettingsSnapshot {
@@ -351,6 +372,8 @@ impl Default for SettingsSnapshot {
             video_path: None,
             font_ui: String::new(),
             font_mono: String::new(),
+            font_ui_file: None,
+            font_mono_file: None,
         }
     }
 }
@@ -382,8 +405,14 @@ impl SettingsSnapshot {
         if !self.font_ui.is_empty() {
             out.push_str(&format!("font.ui={}\n", self.font_ui));
         }
+        if let Some(p) = &self.font_ui_file {
+            out.push_str(&format!("font.ui.file={}\n", p.display()));
+        }
         if !self.font_mono.is_empty() {
             out.push_str(&format!("font.mono={}\n", self.font_mono));
+        }
+        if let Some(p) = &self.font_mono_file {
+            out.push_str(&format!("font.mono.file={}\n", p.display()));
         }
         out
     }
@@ -434,6 +463,12 @@ impl SettingsSnapshot {
                 }
                 "font.ui" => snap.font_ui = val.to_string(),
                 "font.mono" => snap.font_mono = val.to_string(),
+                "font.ui.file" => {
+                    snap.font_ui_file = (!val.is_empty()).then(|| PathBuf::from(val));
+                }
+                "font.mono.file" => {
+                    snap.font_mono_file = (!val.is_empty()).then(|| PathBuf::from(val));
+                }
                 _ => {} // 未知键忽略
             }
         }
@@ -469,6 +504,14 @@ struct BgToolApp {
     video_path: Option<PathBuf>,
     font_ui: String,
     font_mono: String,
+    /// 导入的界面/代码字体文件（文件模式，优先于上面的字体名）。
+    font_ui_file: Option<PathBuf>,
+    font_mono_file: Option<PathBuf>,
+    /// 启动时从注册表枚举的系统字体名列表（读取失败为空，仍可手填）。
+    system_fonts: Vec<String>,
+    /// 两个字体下拉框弹层内过滤框的内容。
+    font_ui_filter: String,
+    font_mono_filter: String,
     side_alpha: f32,
     panel_alpha: f32,
     log: String,
@@ -495,6 +538,11 @@ impl BgToolApp {
             video_path: None,
             font_ui: String::new(),
             font_mono: String::new(),
+            font_ui_file: None,
+            font_mono_file: None,
+            system_fonts: enumerate_system_fonts(),
+            font_ui_filter: String::new(),
+            font_mono_filter: String::new(),
             side_alpha: 0.55,
             panel_alpha: 0.25,
             log: String::new(),
@@ -504,6 +552,11 @@ impl BgToolApp {
             save_due: None,
         };
         app.log_push("Kimi Code 背景更换工具已启动");
+        if app.system_fonts.is_empty() {
+            app.log_push("未读取到系统字体列表（注册表访问失败），字体仍可手动输入");
+        } else {
+            app.log_push(&format!("已枚举到 {} 个系统字体", app.system_fonts.len()));
+        }
         match detect_install_path() {
             Some(p) => {
                 app.log_push(&format!("自动检测到安装路径: {}", p.display()));
@@ -543,6 +596,8 @@ impl BgToolApp {
             video_path: self.video_path.clone(),
             font_ui: self.font_ui.clone(),
             font_mono: self.font_mono.clone(),
+            font_ui_file: self.font_ui_file.clone(),
+            font_mono_file: self.font_mono_file.clone(),
         }
     }
 
@@ -565,6 +620,23 @@ impl BgToolApp {
                 self.video_path = Some(p.clone());
             } else {
                 self.log_push(&format!("上次选择的视频已失效: {}", p.display()));
+            }
+        }
+        // 字体文件槽恢复：文件失效时清掉回到名字模式（与图片/视频槽同策略）
+        self.font_ui_file = None;
+        if let Some(p) = &s.font_ui_file {
+            if p.is_file() {
+                self.font_ui_file = Some(p.clone());
+            } else {
+                self.log_push(&format!("上次选择的界面字体文件已失效: {}", p.display()));
+            }
+        }
+        self.font_mono_file = None;
+        if let Some(p) = &s.font_mono_file {
+            if p.is_file() {
+                self.font_mono_file = Some(p.clone());
+            } else {
+                self.log_push(&format!("上次选择的代码字体文件已失效: {}", p.display()));
             }
         }
     }
@@ -747,6 +819,42 @@ impl BgToolApp {
         }
     }
 
+    /// 部署单个字体槽的导入文件为版本化名（<prefix>-<毫秒>.<ext>）并惰性清理旧版。
+    /// 扩展名不支持/部署失败时日志报错并返回 None（调用方回退字体名模式，不影响其余补丁）。
+    /// 成功返回 (部署文件名, @font-face format 值)。
+    fn deploy_font(&mut self, src: &Path, dist: &Path, label: &str, prefix: &str) -> Option<(String, &'static str)> {
+        let ext = src
+            .extension()
+            .map(|e| e.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+        let Some(format) = font_file_format(&ext) else {
+            self.log_push(&format!("{label}: 不支持的字体格式 .{ext}，仅支持 TTF/WOFF/WOFF2"));
+            return None;
+        };
+        match deploy_font_file(src, dist, prefix, &ext) {
+            Ok(d) => {
+                self.log_push(&format!(
+                    "{label}: 字体文件已部署: {}（{:.1} MB）",
+                    d.name,
+                    d.bytes as f64 / 1024.0 / 1024.0
+                ));
+                if d.bytes > FONT_FILE_WARN_BYTES as u64 {
+                    self.log_push(&format!(
+                        "{label}: 字体文件超过 8MB（CJK 字体常见），每次启动 Kimi Code 都要加载，会略微拖慢启动"
+                    ));
+                }
+                if d.cleanup_blocked {
+                    self.log_push("旧字体文件暂被占用，下次应用时自动清理");
+                }
+                Some((d.name, format))
+            }
+            Err(e) => {
+                self.log_push(&format!("{label}: 字体文件部署失败: {e:#}"));
+                None
+            }
+        }
+    }
+
     fn do_apply(&mut self) {
         let root = match self.root.clone() {
             Some(r) => r,
@@ -791,6 +899,47 @@ impl BgToolApp {
                 None
             }
         };
+        // 字体文件部署（方案 A）：版本化文件名（与视频同一套思路，不覆盖被占用的旧文件）。
+        // 槽不在文件模式时清理该前缀全部旧部署文件；部署失败回退字体名模式，不影响其余补丁。
+        let font_ui_dep = match self.font_ui_file.clone() {
+            Some(src) => self.deploy_font(&src, &dist, "界面字体", FONT_UI_FILE_PREFIX),
+            None => {
+                if cleanup_old_font_files(&dist, FONT_UI_FILE_PREFIX, None) {
+                    self.log_push("旧界面字体文件暂被占用，下次应用时自动清理");
+                }
+                None
+            }
+        };
+        let font_mono_dep = match self.font_mono_file.clone() {
+            Some(src) => self.deploy_font(&src, &dist, "代码字体", FONT_MONO_FILE_PREFIX),
+            None => {
+                if cleanup_old_font_files(&dist, FONT_MONO_FILE_PREFIX, None) {
+                    self.log_push("旧代码字体文件暂被占用，下次应用时自动清理");
+                }
+                None
+            }
+        };
+        // 字体名先克隆到局部变量，避免 setting 借用 self 与 log_push 的可变借用冲突
+        let font_ui_name = self.font_ui.clone();
+        let font_mono_name = self.font_mono.clone();
+        let font_ui_setting = match &font_ui_dep {
+            Some((name, format)) => FontSlotSetting::File { name: name.as_str(), format: *format },
+            None => {
+                if self.font_ui_file.is_some() {
+                    self.log_push("界面字体文件部署失败，本次回退为字体名模式");
+                }
+                FontSlotSetting::from(font_ui_name.as_str())
+            }
+        };
+        let font_mono_setting = match &font_mono_dep {
+            Some((name, format)) => FontSlotSetting::File { name: name.as_str(), format: *format },
+            None => {
+                if self.font_mono_file.is_some() {
+                    self.log_push("代码字体文件部署失败，本次回退为字体名模式");
+                }
+                FontSlotSetting::from(font_mono_name.as_str())
+            }
+        };
         // 图片槽全空时：视频激活必须走带透明化规则的纯视频补丁（否则界面恢复不透明底，
         // 白底盖住视频层）；无视频则 build_patch 只产出字体块或 None（不透明化界面）
         let patch = if dark.is_none() && light.is_none() && video_name.is_some() {
@@ -799,8 +948,8 @@ impl BgToolApp {
                 self.light.alpha,
                 self.side_alpha,
                 self.panel_alpha,
-                &self.font_ui,
-                &self.font_mono,
+                font_ui_setting,
+                font_mono_setting,
             ))
         } else {
             build_patch(
@@ -808,8 +957,8 @@ impl BgToolApp {
                 light.as_ref().map(|t| (t.b64.as_str(), self.light.alpha, t.mime)),
                 self.side_alpha,
                 self.panel_alpha,
-                &self.font_ui,
-                &self.font_mono,
+                font_ui_setting,
+                font_mono_setting,
             )
         };
         match apply_patch(&root, patch.as_deref()) {
@@ -1225,6 +1374,56 @@ fn common_candidates() -> Vec<PathBuf> {
     v
 }
 
+/// 清洗注册表 Fonts 值名列表为字体名列表：
+/// 剥离末尾 " (TrueType)"/" (OpenType)"/" (所有版本)" 类后缀（可能叠加，循环剥）；
+/// TTC 多 face 值名（"A & B" 形式）只取第一个 face 名；去空白、去重、排序。
+fn clean_font_value_names(names: Vec<String>) -> Vec<String> {
+    const SUFFIXES: [&str; 3] = [" (TrueType)", " (OpenType)", " (所有版本)"];
+    let mut out: Vec<String> = names
+        .into_iter()
+        .filter_map(|n| {
+            let mut s = n.trim().to_string();
+            loop {
+                let before = s.len();
+                for suf in SUFFIXES {
+                    if let Some(stripped) = s.strip_suffix(suf) {
+                        s = stripped.trim_end().to_string();
+                        break;
+                    }
+                }
+                if s.len() == before {
+                    break;
+                }
+            }
+            let first = s.split(" & ").next().unwrap_or_default().trim().to_string();
+            (!first.is_empty()).then_some(first)
+        })
+        .collect();
+    out.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()).then_with(|| a.cmp(b)));
+    out.dedup();
+    out
+}
+
+/// 枚举 Windows 已安装字体名（HKLM+HKCU 的 Fonts 键值名），读取失败（权限等）降级为空列表。
+/// 同步快速操作（实测 <10ms），启动时调用一次即可。
+fn enumerate_system_fonts() -> Vec<String> {
+    use winreg::enums::*;
+    use winreg::RegKey;
+    let mut names = Vec::new();
+    for hive in [HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER] {
+        let Ok(key) = RegKey::predef(hive).open_subkey_with_flags(
+            "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Fonts",
+            KEY_READ,
+        ) else {
+            continue;
+        };
+        for (name, _) in key.enum_values().flatten() {
+            names.push(name);
+        }
+    }
+    clean_font_value_names(names)
+}
+
 fn detect_install_path() -> Option<PathBuf> {
     if let Some(p) = detect_from_registry() {
         if is_valid_root(&p) {
@@ -1322,6 +1521,28 @@ fn strip_patch(css: &str) -> String {
     out
 }
 
+/// 单个字体槽（界面/代码）的设置：
+/// None=不设置；Name=系统/手填字体名（方案 B，零文件部署）；File=导入的字体文件
+/// （方案 A，name 为部署后的版本化文件名，format 为 @font-face format() 值）。
+/// 文件模式优先于名字模式，两种模式可按槽混合。
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum FontSlotSetting<'a> {
+    None,
+    Name(&'a str),
+    File { name: &'a str, format: &'static str },
+}
+
+impl<'a> From<&'a str> for FontSlotSetting<'a> {
+    /// 便捷构造：trim 后为空视为未设置，否则为字体名模式。
+    fn from(s: &'a str) -> Self {
+        if s.trim().is_empty() {
+            FontSlotSetting::None
+        } else {
+            FontSlotSetting::Name(s)
+        }
+    }
+}
+
 /// 字体名消毒：剔除会破坏 CSS 的字符（引号/反斜杠/花括号/尖括号/分号/斜杠/星号/圆括号/控制字符）。
 /// 目的是让字体名只能作为一条合法的 font-family 名字出现，无法闭合声明或注入规则。
 fn sanitize_font_name(name: &str) -> String {
@@ -1339,33 +1560,58 @@ fn sanitize_font_name(name: &str) -> String {
 }
 
 /// 字体覆盖块（与主题无关，dark/light 共用，不分主题镜像）。
-/// 两个字体名都为空（或消毒后为空）时返回 None。
-fn build_font_block(font_ui: &str, font_mono: &str) -> Option<String> {
-    let ui = sanitize_font_name(font_ui);
-    let mono = sanitize_font_name(font_mono);
-    if ui.is_empty() && mono.is_empty() {
+/// 每个槽：名字模式经 sanitize 后为空则跳过；文件模式产出 @font-face + 变量重定义。
+/// 两个槽都无效（None 或消毒后为空）时返回 None。
+fn build_font_block<'a>(
+    font_ui: impl Into<FontSlotSetting<'a>>,
+    font_mono: impl Into<FontSlotSetting<'a>>,
+) -> Option<String> {
+    let render = |setting: FontSlotSetting,
+                  name_tpl: &str,
+                  name_key: &str,
+                  face_tpl: &str|
+     -> Option<String> {
+        match setting {
+            FontSlotSetting::None => None,
+            FontSlotSetting::Name(n) => {
+                let n = sanitize_font_name(n);
+                (!n.is_empty()).then(|| name_tpl.replace(name_key, &n))
+            }
+            FontSlotSetting::File { name, format } => Some(
+                face_tpl.replace("{FILE}", name).replace("{FORMAT}", format),
+            ),
+        }
+    };
+    let ui = render(font_ui.into(), FONT_UI_TEMPLATE, "{FONT_UI}", FONT_FACE_UI_TEMPLATE);
+    let mono = render(
+        font_mono.into(),
+        FONT_MONO_TEMPLATE,
+        "{FONT_MONO}",
+        FONT_FACE_MONO_TEMPLATE,
+    );
+    if ui.is_none() && mono.is_none() {
         return None;
     }
     let mut out = String::from("/* 字体覆盖 */\n");
-    if !ui.is_empty() {
-        out.push_str(&FONT_UI_TEMPLATE.replace("{FONT_UI}", &ui));
+    if let Some(s) = ui {
+        out.push_str(&s);
     }
-    if !mono.is_empty() {
-        out.push_str(&FONT_MONO_TEMPLATE.replace("{FONT_MONO}", &mono));
+    if let Some(s) = mono {
+        out.push_str(&s);
     }
     Some(out)
 }
 
 /// 组装补丁：dark/light 图片透明化块（各自可选）→ 字体块（可选）→ 结束标记。
-/// 图片槽全空但设置了字体时只产出字体块（不加透明化规则——只改字体的用户不一定要壁纸）；
+/// 图片槽全空但设置了字体（名字或文件）时只产出字体块（不加透明化规则——只改字体的用户不一定要壁纸）；
 /// 图片与字体全空则返回 None（纯还原）。
-fn build_patch(
+fn build_patch<'a>(
     dark: Option<(&str, f32, &str)>,
     light: Option<(&str, f32, &str)>,
     side_alpha: f32,
     panel_alpha: f32,
-    font_ui: &str,
-    font_mono: &str,
+    font_ui: impl Into<FontSlotSetting<'a>>,
+    font_mono: impl Into<FontSlotSetting<'a>>,
 ) -> Option<String> {
     let font_block = build_font_block(font_ui, font_mono);
     if dark.is_none() && light.is_none() && font_block.is_none() {
@@ -1404,13 +1650,13 @@ fn build_patch(
 
 /// 仅视频背景（图片槽全空）时的补丁：透明化规则 + 遮罩变量，无图片背景。
 /// 否则界面恢复不透明底，盖住 z-index:-2 的视频层（白屏）。字体块照常追加。
-fn build_video_patch(
+fn build_video_patch<'a>(
     dark_alpha: f32,
     light_alpha: f32,
     side_alpha: f32,
     panel_alpha: f32,
-    font_ui: &str,
-    font_mono: &str,
+    font_ui: impl Into<FontSlotSetting<'a>>,
+    font_mono: impl Into<FontSlotSetting<'a>>,
 ) -> String {
     let mut out = String::from(PATCH_HEADER);
     out.push('\n');
@@ -2285,6 +2531,83 @@ fn deploy_video_file(src: &Path, dist: &Path) -> anyhow::Result<VideoDeploy> {
     })
 }
 
+// ---------- 字体文件部署（方案 A） ----------
+
+/// 扩展名 → @font-face format() 映射；不支持的扩展名（含 otf）返回 None。
+/// 拒绝 .otf：app:// 协议的 MIME 表无 .otf 条目（与 .mp4 同病），字体请求会失败。
+fn font_file_format(ext: &str) -> Option<&'static str> {
+    match ext.to_ascii_lowercase().as_str() {
+        "woff2" => Some("woff2"),
+        "woff" => Some("woff"),
+        "ttf" => Some("truetype"),
+        _ => None,
+    }
+}
+
+/// 惰性清理 desktop-dist 下同前缀的版本化字体文件（<prefix>-*.{ttf,woff,woff2}），保留 keep。
+/// 返回是否有文件删除失败（被占用等；调用方提示，下次应用再清）。
+fn cleanup_old_font_files(dist: &Path, prefix: &str, keep: Option<&str>) -> bool {
+    let Ok(rd) = fs::read_dir(dist) else { return false };
+    let mut blocked = false;
+    let head = format!("{prefix}-");
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if !name.starts_with(&head) {
+            continue;
+        }
+        let is_font = Path::new(&name)
+            .extension()
+            .map(|x| {
+                matches!(
+                    x.to_string_lossy().to_ascii_lowercase().as_str(),
+                    "ttf" | "woff" | "woff2"
+                )
+            })
+            .unwrap_or(false);
+        if !is_font {
+            continue;
+        }
+        if keep == Some(name.as_str()) {
+            continue;
+        }
+        if fs::remove_file(e.path()).is_err() {
+            blocked = true;
+        }
+    }
+    blocked
+}
+
+/// 字体部署结果。
+struct FontDeploy {
+    name: String,
+    cleanup_blocked: bool,
+    bytes: u64,
+}
+
+/// 部署字体文件到版本化文件名 <prefix>-<毫秒时间戳>.<ext>（同毫秒冲突自增）：
+/// 不覆盖可能被占用的旧文件，成功后惰性清理同前缀旧版本。读取/写入失败返回 Err。
+/// ext 调用方须已过 font_file_format 校验并小写化，保证部署名与补丁引用安全一致。
+fn deploy_font_file(src: &Path, dist: &Path, prefix: &str, ext: &str) -> anyhow::Result<FontDeploy> {
+    let data = fs::read(src).with_context(|| format!("读取字体文件失败: {}", src.display()))?;
+    let mut stamp = unix_now_ms();
+    let mut dest = dist.join(format!("{prefix}-{stamp}.{ext}"));
+    while dest.exists() {
+        stamp += 1;
+        dest = dist.join(format!("{prefix}-{stamp}.{ext}"));
+    }
+    fs::write(&dest, &data).with_context(|| format!("写入 {} 失败", dest.display()))?;
+    let name = dest
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let cleanup_blocked = cleanup_old_font_files(dist, prefix, Some(&name));
+    Ok(FontDeploy {
+        name,
+        cleanup_blocked,
+        bytes: data.len() as u64,
+    })
+}
+
 // ---------- 图片处理 ----------
 
 struct ProcessedImage {
@@ -2554,6 +2877,126 @@ fn slot_card(ui: &mut egui::Ui, title: &str, slot: &mut Slot, ctx: &egui::Contex
     crop_requested
 }
 
+/// 字体槽设置行：可搜索下拉框（名字模式：系统字体列表 + 手填）+ 导入本地字体文件
+/// （文件模式，优先于名字模式）。文件模式下下拉框禁用，显示文件名与「清除文件」按钮。
+/// 接受 .ttf/.woff/.woff2；拒绝 .otf（app:// 协议 MIME 表无 .otf 条目，字体请求会失败）。
+fn font_slot_row(
+    ui: &mut egui::Ui,
+    id: &str,
+    label: &str,
+    name: &mut String,
+    file: &mut Option<PathBuf>,
+    filter: &mut String,
+    fonts: &[String],
+    log: &mut String,
+) {
+    let file_mode = file.is_some();
+    ui.horizontal(|ui| {
+        ui.label(label);
+        let w = (ui.available_width() - 16.0).max(120.0);
+        ui.add_enabled_ui(!file_mode, |ui| {
+            let btn_text = if name.is_empty() {
+                "默认".to_string()
+            } else {
+                name.clone()
+            };
+            egui::ComboBox::from_id_salt(id)
+                .selected_text(btn_text)
+                .width(w)
+                .show_ui(ui, |ui| {
+                    // 顶部过滤框：打开即可输入，大小写不敏感子串过滤
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(filter).hint_text("输入过滤，或直接填任意字体名"),
+                    );
+                    resp.request_focus();
+                    let q = filter.trim().to_lowercase();
+                    ui.separator();
+                    egui::ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
+                        // 第一项固定：默认（不设置）
+                        if ui.selectable_label(name.is_empty(), "默认（不设置）").clicked() {
+                            name.clear();
+                            ui.close_menu();
+                        }
+                        // 过滤内容不精确匹配任何字体时给出「使用」项，保留手填任意字体名的能力
+                        let custom = filter.trim();
+                        if !custom.is_empty() && !fonts.iter().any(|f| f.to_lowercase() == q) {
+                            if ui.selectable_label(false, format!("使用「{custom}」")).clicked() {
+                                *name = custom.to_string();
+                                ui.close_menu();
+                            }
+                            ui.separator();
+                        }
+                        if fonts.is_empty() {
+                            ui.label(
+                                egui::RichText::new("未读取到系统字体列表，可直接输入字体名")
+                                    .size(12.0)
+                                    .color(C_MUTED),
+                            );
+                        }
+                        for f in fonts
+                            .iter()
+                            .filter(|f| q.is_empty() || f.to_lowercase().contains(&q))
+                        {
+                            if ui.selectable_label(*name == *f, f).clicked() {
+                                *name = f.clone();
+                                ui.close_menu();
+                            }
+                        }
+                    });
+                });
+        });
+    });
+    ui.horizontal(|ui| {
+        match file {
+            Some(p) => {
+                let fname = p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                ui.label(egui::RichText::new(format!("已导入: {fname}")).size(12.0));
+                if ui.small_button("清除文件").clicked() {
+                    *file = None;
+                    log.push_str(&format!("已清除{label}的导入文件，回到字体名模式\n"));
+                }
+            }
+            None => {
+                if ui.small_button("选文件...").clicked() {
+                    let picked = rfd::FileDialog::new()
+                        .add_filter("字体文件", &["ttf", "woff", "woff2", "otf"])
+                        .pick_file();
+                    if let Some(f) = picked {
+                        let ext = f
+                            .extension()
+                            .map(|e| e.to_string_lossy().to_ascii_lowercase())
+                            .unwrap_or_default();
+                        if ext == "otf" {
+                            log.push_str("OTF 不在应用协议白名单，请转换为 WOFF2 或改用系统字体\n");
+                        } else if font_file_format(&ext).is_none() {
+                            log.push_str(&format!("不支持的字体格式 .{ext}，仅支持 TTF/WOFF/WOFF2\n"));
+                        } else {
+                            if let Ok(m) = fs::metadata(&f) {
+                                if m.len() > FONT_FILE_WARN_BYTES as u64 {
+                                    log.push_str(&format!(
+                                        "{label}: 字体文件体积较大（{:.1} MB），部署后每次启动都要加载\n",
+                                        m.len() as f64 / 1024.0 / 1024.0
+                                    ));
+                                }
+                            }
+                            log.push_str(&format!("已导入{label}文件: {}\n", f.display()));
+                            *file = Some(f);
+                        }
+                    }
+                }
+                ui.label(
+                    egui::RichText::new("导入本地字体文件（TTF/WOFF/WOFF2）")
+                        .size(12.0)
+                        .color(C_MUTED),
+                );
+            }
+        }
+    });
+}
+
 impl eframe::App for BgToolApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default()
@@ -2705,29 +3148,32 @@ impl eframe::App for BgToolApp {
 
                     ui.add_space(10.0);
 
-                    // 6. 界面字体卡片（方案 B：只改字体名，不部署字体文件）
+                    // 6. 界面字体卡片：系统字体下拉（可搜索/可手填）+ 导入本地字体文件（文件模式优先）
                     card(ui, "界面字体", |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label("界面字体");
-                            let w = (ui.available_width() - 16.0).max(120.0);
-                            ui.add_sized(
-                                [w, 22.0],
-                                egui::TextEdit::singleline(&mut self.font_ui)
-                                    .hint_text("如：Microsoft YaHei、霞鹜文楷（留空用默认）"),
-                            );
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("代码字体");
-                            let w = (ui.available_width() - 16.0).max(120.0);
-                            ui.add_sized(
-                                [w, 22.0],
-                                egui::TextEdit::singleline(&mut self.font_mono)
-                                    .hint_text("如：Cascadia Code、Consolas（留空用默认）"),
-                            );
-                        });
+                        font_slot_row(
+                            ui,
+                            "font_ui_slot",
+                            "界面字体",
+                            &mut self.font_ui,
+                            &mut self.font_ui_file,
+                            &mut self.font_ui_filter,
+                            &self.system_fonts,
+                            &mut self.log,
+                        );
+                        ui.add_space(4.0);
+                        font_slot_row(
+                            ui,
+                            "font_mono_slot",
+                            "代码字体",
+                            &mut self.font_mono,
+                            &mut self.font_mono_file,
+                            &mut self.font_mono_filter,
+                            &self.system_fonts,
+                            &mut self.log,
+                        );
                         ui.label(
                             egui::RichText::new(
-                                "填 Windows 已安装的字体名，应用热更新后即时生效；留空恢复默认",
+                                "下拉选择系统字体，或在过滤框直接输入任意字体名；「选文件...」导入本地字体文件（文件模式优先生效）；全留空恢复默认",
                             )
                             .size(12.0)
                             .color(C_MUTED),
@@ -3176,6 +3622,8 @@ mod tests {
             video_path: None,
             font_ui: "霞鹜文楷".to_string(),
             font_mono: "Cascadia Code".to_string(),
+            font_ui_file: None,
+            font_mono_file: None,
         };
         let back = SettingsSnapshot::from_conf(&s.to_conf());
         assert_eq!(back, s, "含 crop/字体的完整快照应 round-trip（含中文/空格/= 路径）");
@@ -3196,6 +3644,8 @@ mod tests {
             video_path: Some(PathBuf::from("F:\\视频\\bg.mp4")),
             font_ui: String::new(),
             font_mono: String::new(),
+            font_ui_file: None,
+            font_mono_file: None,
         };
         let back = SettingsSnapshot::from_conf(&s.to_conf());
         assert_eq!(back.dark_path, s.dark_path);
@@ -3265,6 +3715,41 @@ light.crop=,,
         let empty_lines = SettingsSnapshot::from_conf("font.ui=\nfont.mono=\n");
         assert_eq!(empty_lines.font_ui, "");
         assert_eq!(empty_lines.font_mono, "");
+    }
+
+    #[test]
+    fn test_conf_font_file_keys() {
+        // 文件模式 round-trip（含中文/空格路径）
+        let s = SettingsSnapshot {
+            font_ui_file: Some(PathBuf::from("D:\\字 体\\MiSans.woff2")),
+            font_mono_file: Some(PathBuf::from("E:\\code=a.ttf")),
+            ..Default::default()
+        };
+        let text = s.to_conf();
+        assert!(text.contains("font.ui.file=D:\\字 体\\MiSans.woff2\n"), "应写 font.ui.file 行: {text}");
+        assert!(text.contains("font.mono.file=E:\\code=a.ttf\n"), "应写 font.mono.file 行: {text}");
+        let back = SettingsSnapshot::from_conf(&text);
+        assert_eq!(back, s, "字体文件路径应 round-trip");
+
+        // 只设一个：另一个不写行
+        let only_ui = SettingsSnapshot {
+            font_ui_file: Some(PathBuf::from("D:\\f.ttf")),
+            ..Default::default()
+        };
+        assert!(only_ui.to_conf().contains("font.ui.file="));
+        assert!(!only_ui.to_conf().contains("font.mono.file"));
+
+        // 旧 conf（只有 font.ui 名字、无 .file 键）向后兼容：文件槽为 None（名字模式）
+        let old = SettingsSnapshot::from_conf("font.ui=Microsoft YaHei\nfont.mono=Consolas\n");
+        assert_eq!(old.font_ui, "Microsoft YaHei");
+        assert_eq!(old.font_mono, "Consolas");
+        assert_eq!(old.font_ui_file, None, "旧 conf 无 font.ui.file 键应为 None");
+        assert_eq!(old.font_mono_file, None);
+
+        // 空值行按未设置处理
+        let empty = SettingsSnapshot::from_conf("font.ui.file=\nfont.mono.file=\n");
+        assert_eq!(empty.font_ui_file, None);
+        assert_eq!(empty.font_mono_file, None);
     }
 
     #[test]
@@ -3431,6 +3916,208 @@ light.crop=,,
         assert_eq!(blk.matches('}').count(), 1);
         // 消毒后为空 → 等同未设置
         assert!(build_font_block("\";}{", "").is_none());
+    }
+
+    #[test]
+    fn test_clean_font_value_names() {
+        let cleaned = clean_font_value_names(vec![
+            "楷体 (TrueType)".to_string(),
+            "微软雅黑 & 微软雅黑 Light (TrueType)".to_string(),
+            "Arial (TrueType)".to_string(),
+            "Arial (TrueType)".to_string(), // HKLM/HKCU 重复项应去重
+            "Consolas (OpenType)".to_string(),
+            "Nirmala UI (所有版本)".to_string(),
+            "Segoe UI Variable (TrueType) (所有版本)".to_string(), // 叠加后缀循环剥
+            "  Cascadia Code  ".to_string(),                       // 无后缀原样保留（去空白）
+            "   ".to_string(),                                     // 纯空白丢弃
+        ]);
+        assert_eq!(
+            cleaned,
+            vec![
+                "Arial",
+                "Cascadia Code",
+                "Consolas",
+                "Nirmala UI",
+                "Segoe UI Variable",
+                "微软雅黑",
+                "楷体"
+            ],
+            "后缀剥离 + 多 face 取首 + 去重排序: {cleaned:?}"
+        );
+        assert!(clean_font_value_names(vec![]).is_empty());
+    }
+
+    #[test]
+    fn test_font_file_format() {
+        assert_eq!(font_file_format("woff2"), Some("woff2"));
+        assert_eq!(font_file_format("WOFF2"), Some("woff2"), "大小写不敏感");
+        assert_eq!(font_file_format("woff"), Some("woff"));
+        assert_eq!(font_file_format("ttf"), Some("truetype"));
+        assert_eq!(font_file_format("TTF"), Some("truetype"));
+        // otf 不在 app:// 协议 MIME 表白名单，拒绝
+        assert_eq!(font_file_format("otf"), None);
+        assert_eq!(font_file_format("eot"), None);
+        assert_eq!(font_file_format(""), None);
+    }
+
+    #[test]
+    fn test_build_font_block_file_mode() {
+        // 界面字体文件模式：@font-face + 变量重定义；自定义字体进 --font-ui 首位（不进 latin）
+        let ui_file = FontSlotSetting::File { name: "kimi-wallpaper-font-ui-123.woff2", format: "woff2" };
+        let blk = build_font_block(ui_file, FontSlotSetting::None).unwrap();
+        assert!(blk.contains("/* 字体覆盖 */"));
+        assert!(
+            blk.contains("@font-face{font-family:\"KimiFontUI\";src:url(/kimi-wallpaper-font-ui-123.woff2) format(\"woff2\");font-display:swap}"),
+            "@font-face 应含绝对路径 url 与 format 映射: {blk}"
+        );
+        assert!(blk.contains("--font-ui:\"KimiFontUI\",\"Noto Sans SC Variable\""), "文件字体应进 --font-ui 首位");
+        assert!(blk.contains("--sans:var(--font-ui)"));
+        assert!(blk.contains("--font-display:var(--font-ui)"));
+        assert!(blk.contains("--markdown-font-family:var(--font-ui)"));
+        assert!(!blk.contains("--font-ui-latin"), "文件模式不应碰 latin 槽");
+        assert!(!blk.contains("--font-mono"), "未设置代码字体时不应产出 mono 规则");
+        assert!(!blk.contains("{FILE}") && !blk.contains("{FORMAT}"), "占位符应全部替换");
+
+        // 代码字体文件模式：format 映射 ttf→truetype
+        let mono_file = FontSlotSetting::File { name: "kimi-wallpaper-font-mono-456.ttf", format: "truetype" };
+        let mblk = build_font_block(FontSlotSetting::None, mono_file).unwrap();
+        assert!(mblk.contains("font-family:\"KimiFontMono\""));
+        assert!(mblk.contains("url(/kimi-wallpaper-font-mono-456.ttf) format(\"truetype\")"));
+        assert!(mblk.contains("--font-mono:\"KimiFontMono\",\"JetBrains Mono Variable\""));
+        assert!(mblk.contains("--mono:var(--font-mono)"));
+        assert!(mblk.contains("--markdown-code-font-family:var(--font-mono)"));
+        assert!(!mblk.contains("--font-ui:"), "未设置界面字体时不应产出 UI 规则");
+
+        // 混合：界面文件 + 代码名字
+        let mixed = build_font_block(ui_file, FontSlotSetting::Name("Cascadia Code")).unwrap();
+        assert!(mixed.contains("@font-face{font-family:\"KimiFontUI\""));
+        assert!(mixed.contains("--font-mono:\"Cascadia Code\""), "名字模式槽照常消毒产出");
+        assert!(!mixed.contains("@font-face{font-family:\"KimiFontMono\""));
+
+        // 两个槽都 None → None
+        assert!(build_font_block(FontSlotSetting::None, FontSlotSetting::None).is_none());
+    }
+
+    #[test]
+    fn test_build_patch_file_only() {
+        // 仅文件模式字体（无图无视频无名字）：补丁只含字体块，不附带透明化规则
+        let ui_file = FontSlotSetting::File { name: "kimi-wallpaper-font-ui-789.woff", format: "woff" };
+        let patch = build_patch(None, None, 0.55, 0.25, ui_file, FontSlotSetting::None).unwrap();
+        assert!(patch.starts_with(PATCH_HEADER));
+        assert!(patch.ends_with("/* === kimi-wallpaper-patch end === */\n"));
+        assert!(patch.contains("url(/kimi-wallpaper-font-ui-789.woff) format(\"woff\")"));
+        assert!(patch.contains("--font-ui:\"KimiFontUI\""));
+        assert!(!patch.contains("--kimi-wallpaper-dark"));
+        assert!(!patch.contains("--kimi-wallpaper-mask"));
+        assert!(!patch.contains("background:transparent"));
+        assert_eq!(patch.matches(PATCH_HEADER).count(), 1);
+
+        // 纯视频补丁 + 文件模式字体：透明化规则保留，@font-face 照常追加
+        let vpatch = build_video_patch(0.80, 0.78, 0.55, 0.25, ui_file, FontSlotSetting::None);
+        assert!(vpatch.contains("--kimi-wallpaper-mask"), "透明化/遮罩规则不应被挤掉");
+        assert!(vpatch.contains("background:transparent !important"));
+        assert!(vpatch.contains("@font-face{font-family:\"KimiFontUI\""));
+        let mask_at = vpatch.find("--kimi-wallpaper-mask").unwrap();
+        let face_at = vpatch.find("@font-face").unwrap();
+        let end_at = vpatch.find(PATCH_END_MARK).unwrap();
+        assert!(mask_at < face_at && face_at < end_at, "字体块应在遮罩规则之后、结束标记之前");
+    }
+
+    #[test]
+    fn test_deploy_font_versioned_and_cleanup() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("test-fixture").join("font-deploy");
+        let _ = fs::remove_dir_all(&dir);
+        let dist = dir.join("dist");
+        fs::create_dir_all(&dist).unwrap();
+        let src = dir.join("MiSans.woff2");
+        fs::write(&src, b"fake-font-bytes").unwrap();
+        // 预置陈旧版本 + 另一槽前缀 + 干扰文件
+        fs::write(dist.join("kimi-wallpaper-font-ui-999.woff2"), b"stale").unwrap();
+        fs::write(dist.join("kimi-wallpaper-font-mono-999.ttf"), b"other-slot").unwrap();
+        fs::write(dist.join("kimi-wallpaper-hot.css"), b"css").unwrap();
+
+        // 第一次部署：产生版本化文件，同前缀陈旧版被惰性清理，其它前缀/干扰文件保留
+        let d1 = deploy_font_file(&src, &dist, FONT_UI_FILE_PREFIX, "woff2").unwrap();
+        assert!(d1.name.starts_with("kimi-wallpaper-font-ui-") && d1.name.ends_with(".woff2"));
+        assert!(!d1.cleanup_blocked);
+        assert_eq!(d1.bytes, b"fake-font-bytes".len() as u64);
+        assert_eq!(fs::read(dist.join(&d1.name)).unwrap(), b"fake-font-bytes");
+        assert!(!dist.join("kimi-wallpaper-font-ui-999.woff2").exists(), "陈旧版本应被清理");
+        assert!(dist.join("kimi-wallpaper-font-mono-999.ttf").exists(), "另一槽前缀不应被动");
+        assert!(dist.join("kimi-wallpaper-hot.css").exists(), "非字体文件不应被动");
+
+        // 第二次部署：产生不同版本名，上一个版本被清掉
+        let d2 = deploy_font_file(&src, &dist, FONT_UI_FILE_PREFIX, "woff2").unwrap();
+        assert_ne!(d1.name, d2.name, "两次部署应产生不同版本名");
+        assert!(!dist.join(&d1.name).exists(), "旧版本应被清理");
+        assert!(dist.join(&d2.name).is_file());
+
+        // 清除文件模式分支：删除该前缀全部版本化文件
+        assert!(!cleanup_old_font_files(&dist, FONT_UI_FILE_PREFIX, None));
+        assert!(!dist.join(&d2.name).exists());
+        assert!(dist.join("kimi-wallpaper-font-mono-999.ttf").exists(), "另一槽前缀仍不应被动");
+    }
+
+    #[test]
+    fn test_do_apply_font_file_mode() {
+        let (root, css_path) = make_fixture("font-file-apply");
+        let dist = root.join("resources").join("desktop-dist");
+        let ui_src = root.join("MyUI.ttf");
+        let mono_src = root.join("MyCode.woff2");
+        fs::write(&ui_src, b"fake-ui-font").unwrap();
+        fs::write(&mono_src, b"fake-mono-font").unwrap();
+
+        // 界面文件 + 代码文件：补丁引用的文件名必须与实际部署的版本化名一致
+        let mut app = test_app(&root);
+        app.font_ui_file = Some(ui_src.clone());
+        app.font_mono_file = Some(mono_src.clone());
+        app.do_apply();
+
+        let css = fs::read_to_string(&css_path).unwrap();
+        assert!(css.contains(PATCH_HEADER), "仅字体文件也应写入补丁:\n{css}");
+        assert!(css.contains("font-family:\"KimiFontUI\""));
+        assert!(css.contains("font-family:\"KimiFontMono\""));
+        let re = regex::Regex::new(r"url\(/((kimi-wallpaper-font-(?:ui|mono))-\d+\.(?:ttf|woff2))\)").unwrap();
+        let names: Vec<String> = re.captures_iter(&css).map(|c| c[1].to_string()).collect();
+        assert_eq!(names.len(), 2, "应有两条 @font-face 引用: {css}");
+        for n in &names {
+            assert!(dist.join(n).is_file(), "补丁引用的 {n} 必须已实际部署");
+        }
+        assert!(names.iter().any(|n| n.ends_with(".ttf")));
+        assert!(names.iter().any(|n| n.ends_with(".woff2")));
+        assert!(app.log.contains("界面字体: 字体文件已部署"), "日志:\n{}", app.log);
+        // 热更 css 同步为同一份补丁全文
+        assert_eq!(fs::read_to_string(hot_css_path(&dist)).unwrap(), css_patch_section(&css));
+
+        // 清除界面字体文件模式再应用：ui 前缀文件全部清掉，mono 重新部署且仅剩一个
+        let mut app2 = test_app(&root);
+        app2.font_mono_file = Some(mono_src.clone());
+        app2.do_apply();
+        let ui_left = fs::read_dir(&dist)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(FONT_UI_FILE_PREFIX))
+            .count();
+        assert_eq!(ui_left, 0, "界面字体文件应全部清理");
+        let mono_left: Vec<String> = fs::read_dir(&dist)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(FONT_MONO_FILE_PREFIX))
+            .collect();
+        assert_eq!(mono_left.len(), 1, "代码字体应仅剩最新部署: {mono_left:?}");
+        let mono_name = mono_left[0].clone();
+        let css2 = fs::read_to_string(&css_path).unwrap();
+        assert!(css2.contains(&format!("url(/{mono_name})")), "新补丁应引用新部署名");
+        assert!(!css2.contains("KimiFontUI"), "界面字体槽已清空，不应再产出 UI 规则");
+
+        // 全清空后应用：无任何配置 → 纯还原
+        let mut app3 = test_app(&root);
+        app3.do_apply();
+        assert_eq!(fs::read_to_string(&css_path).unwrap(), ORIG_CSS, "无任何配置应纯还原");
+        assert!(app3.log.contains("已移除补丁（纯还原）"), "日志:\n{}", app3.log);
+        assert!(!dist.join(&mono_name).exists(), "代码字体文件也应全部清理");
     }
 
     #[test]
@@ -4141,6 +4828,11 @@ light.crop=,,
             video_path: None,
             font_ui: String::new(),
             font_mono: String::new(),
+            font_ui_file: None,
+            font_mono_file: None,
+            system_fonts: Vec::new(),
+            font_ui_filter: String::new(),
+            font_mono_filter: String::new(),
             side_alpha: 0.55,
             panel_alpha: 0.25,
             log: String::new(),

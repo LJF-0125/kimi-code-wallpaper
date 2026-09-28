@@ -1,6 +1,6 @@
 # AGENTS.md — kimi-bg-tool（Kimi Code 背景更换工具）
 
-给 Kimi Code 桌面应用（Electron）换自定义壁纸的 Windows GUI 小工具。Rust 单文件实现，选图/裁剪/调透明度后把图片压成 base64 JPEG 内嵌进主样式表补丁，支持热更新免重启。
+给 Kimi Code 桌面应用（Electron）换自定义壁纸的 Windows GUI 小工具。Rust 单文件实现，选图/裁剪/调透明度/填字体名后把图片压成 base64 JPEG 内嵌进主样式表补丁，支持热更新免重启。
 
 ## 构建与测试
 
@@ -22,6 +22,7 @@ cargo test --release     # 全部测试必须通过
 - 首次写入前备份为 `主样式表名.wallpaper-bak`；「还原原版」只能从备份恢复，**永远不要无备份覆盖**
 - 主样式表文件名带 hash（如 `main-c0uVXxKo.css`），由 `locate_main_css` 从 index.html 里解析，**不要硬编码文件名**
 - 透明化名单（`.app/.con/body/#app` 全透明、`.sidebar-actions` 侧边栏顶部「新建会话/搜索」按钮区容器（div.sidebar-actions 实色 rgb(249,251,252)，CDP 实测，所在 .side 已半透明故全透明即可）、`.side/.windows-titlebar` 侧边栏透明度、`.global-preview/.agent-panel/.file-preview/.fp-body/.ui-panel-header/.chat-header/.topbar` 面板透明度、`.sc` 侧边聊天面板（/btw，aside.global-preview > .pt-shell > .pt-body 内的白底根容器，与面板组同款 {PA}）、`.chat-dock:before`）是反复用 CDP 探针排出来的，dark/light/system 三套镜像必须同步改
+- **字体覆盖**（`build_font_block` 纯函数，方案 B 零文件部署）：界面字体全走 `:root` 的 `--font-ui`（别名 `--sans`/`--font-display`/`--markdown-font-family`）、代码字体走 `--font-mono`（别名 `--mono`/`--markdown-code-font-family`），改这两个变量即改全界面。用 `:root:root` 提特异性（全应用样式表 `font-family !important` 数量为 0，追加末尾即可覆盖）；**不要碰字号**（应用自带 data-font-scale），**不要用 `*{font-family:!important}`**（会砸 KaTeX 数学字体）。字体与主题无关不分镜像，插在 dark/light 块之后、结束标记之前。字体名经 `sanitize_font_name` 消毒（剔除 `"` `'` `\` `{}` `<>` `;` `/` `*` `()` 与控制字符）防 CSS 注入；两个名都空（或消毒后为空）→ 不产出字体块
 
 ### 热更新
 - 探针块（`kimi-wallpaper-hot-hook`）插在 `index.html` 最后一个 `</body>` 前；index.html 也有 `.wallpaper-bak` 备份。当前为 **v3**（块内 `<!-- version: v3 -->` 标记，`HOOK_VERSION_MARK`）
@@ -33,7 +34,7 @@ cargo test --release     # 全部测试必须通过
 - **音轨剥除**（`mp4_track_handlers` 检测 + `strip_audio_remux`）：探针 muted 播放、音轨纯浪费，部署时剥除音轨/字幕/数据轨——保留第一个 vide trak，按 stsc/stsz/stco 样本表从原 mdat 提取视频样本重建 mdat（一样本一 chunk），moov 只含视频轨（mvhd/tkhd/stsd/stts/ctts/stss 原样），输出天然 faststart（ftyp+moov+mdat）。无音轨视频不做重建直接走 faststart 路径；分片 MP4（mvex）/stz2/表不一致一律 Err 回退原样部署并日志
 - 探针 fetch **必须用绝对路径** `/kimi-wallpaper-hot.*`——相对路径在 `/sessions/<id>` 路由下会 404 静默失效（踩过的坑）
 - 升级检测：`hook_needs_upgrade` = 含起始标记但缺 `HOOK_VERSION_MARK`（v1/v2 等无当前标记的旧块）。`install_hook` 幂等策略：未安装→插入；旧块→remove 后再插当前块；已当前→原样返回。UI 三态：绿「已启用 v3」/ 黄「需升级」（按钮「升级热更新」）/ 灰「未启用」
-- **纯视频白屏修复**：图片槽全空但视频激活时，`build_patch` 返回 None 会把热更 CSS 清空 → 界面恢复不透明背景盖住视频层（白屏）。`do_apply` 在该分支改发 `build_video_patch`（`VIDEO_TEMPLATE`：透明化规则 + `--kimi-wallpaper-mask` 变量 + html `background:transparent`，无图片）；无任何配置（无图无视频）时仍返回 None 走纯还原，行为不变
+- **纯视频白屏修复**：图片槽全空但视频激活时，`build_patch` 返回 None 会把热更 CSS 清空 → 界面恢复不透明背景盖住视频层（白屏）。`do_apply` 在该分支改发 `build_video_patch`（`VIDEO_TEMPLATE`：透明化规则 + `--kimi-wallpaper-mask` 变量 + html `background:transparent`，无图片；字体块照常追加）。**图槽全空但设了字体**时 `build_patch` 只产出字体块（不附带透明化规则——只改字体的用户不一定要壁纸）；图片/视频/字体全空才返回 None 走纯还原
 - Kimi Code 应用更新会冲掉 index.html（探针）和 main-*.css（补丁），热更文件可能幸存但成孤儿。更新后的恢复流程见 `T:\KCD BackGrond\热更新探针-档案与恢复指南.md`
 
 ### 图片管线
@@ -45,7 +46,7 @@ cargo test --release     # 全部测试必须通过
 - **耗电警告**：GIF 槽选中、视频槽常驻显示橙色警告「持续占用 CPU/GPU，会增加耗电」；视频部署/GIF 嵌入时日志同步警告
 
 ### 配置持久化
-- `kimi-bg-tool.conf`（exe 同目录，`conf_path()` 基于 `current_exe`，失败则静默跳过）：`key=value` 每行一条，持久化安装路径、side/panel 透明度、两槽位的 path/alpha/裁剪选区（`x,y,w,h` 逗号分隔，None 不写行）、视频路径（`video.path`）。解析用 `splitn(2, '=')`，路径含 `=`/中文安全
+- `kimi-bg-tool.conf`（exe 同目录，`conf_path()` 基于 `current_exe`，失败则静默跳过）：`key=value` 每行一条，持久化安装路径、side/panel 透明度、两槽位的 path/alpha/裁剪选区（`x,y,w,h` 逗号分隔，None 不写行）、视频路径（`video.path`）、界面/代码字体名（`font.ui`/`font.mono`，空串不写行）。解析用 `splitn(2, '=')`，路径含 `=`/中文安全
 - `SettingsSnapshot::to_conf/from_conf` 纯函数（有单测），from_conf 对缺行/坏行/未知键容错，缺字段取默认值（alpha 0.80/0.78/0.55/0.25）
 - 防抖 500ms 写盘：`update_persistence` 每帧比对 `snapshot().to_conf()`，变了记 `save_due`，到期才 `fs::write`；`request_repaint_after` 保证工具闲置时到期帧被唤醒落盘。写失败仅记一行日志不重试刷屏
 - 启动恢复顺序：注册表自动检测在前 → conf 覆盖（conf 字段优先，用户手改的安装路径高于注册表）→ 槽位图片文件失效时清槽并记日志「上次选择的图片已失效: <路径>」
@@ -53,6 +54,7 @@ cargo test --release     # 全部测试必须通过
 ### GUI
 - egui 无 CJK 字体，`install_cjk_font` 从 `C:\Windows\Fonts` 加载微软雅黑，别删
 - 裁剪编辑器（`open_crop_editor`/`show_crop_editor`）：红框拖拽，角命中 ≤14px 存进 `editor.drag`，一次拖拽期间不重判；`centered_max_crop`/`clamp_crop` 是纯函数，有单测覆盖
+- 「界面字体」卡：`font_ui`/`font_mono` 两个单行 TextEdit（hint 提示填 Windows 已安装字体名、留空用默认）+ 12px 灰字说明，编辑实时进 `SettingsSnapshot` 走同一套 500ms 防抖落盘，无需额外处理
 
 ## 验证手法
 

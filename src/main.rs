@@ -153,6 +153,17 @@ html[data-color-scheme=system] .chat-dock:before{opacity:.45 !important}
 }
 "#;
 
+/// 界面字体覆盖：Kimi Code 全界面字体走 :root 的 --font-ui / --font-mono 两个变量，
+/// 改这两个变量即改全界面；--sans/--font-display/--markdown-font-family 等别名一并指向它们。
+/// 用 :root:root 提高特异性（全应用样式表 font-family !important 数量为 0，追加在末尾即可覆盖）。
+/// 只覆盖 font-family，不碰字号（应用自带 data-font-scale 字号设置）；
+/// 也不做 *{font-family:!important} 全局覆盖（会砸掉 KaTeX 数学字体）。
+const FONT_UI_TEMPLATE: &str = r#":root:root{--font-ui-latin:"{FONT_UI}","Helvetica Neue",Arial;--font-ui:var(--font-ui-latin),"Noto Sans SC Variable","Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Source Han Sans SC",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Ubuntu,sans-serif,"Apple Color Emoji","Segoe UI Emoji","Segoe UI Symbol","Noto Color Emoji";--sans:var(--font-ui);--font-display:var(--font-ui);--markdown-font-family:var(--font-ui)}
+"#;
+
+const FONT_MONO_TEMPLATE: &str = r#":root:root{--font-mono:"{FONT_MONO}","JetBrains Mono Variable","JetBrains Mono",ui-monospace,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;--mono:var(--font-mono);--markdown-code-font-family:var(--font-mono)}
+"#;
+
 // ---------- 数据结构 ----------
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -321,6 +332,8 @@ struct SettingsSnapshot {
     light_alpha: f32,
     light_crop: Option<CropRect>,
     video_path: Option<PathBuf>,
+    font_ui: String,
+    font_mono: String,
 }
 
 impl Default for SettingsSnapshot {
@@ -336,6 +349,8 @@ impl Default for SettingsSnapshot {
             dark_crop: None,
             light_crop: None,
             video_path: None,
+            font_ui: String::new(),
+            font_mono: String::new(),
         }
     }
 }
@@ -363,6 +378,12 @@ impl SettingsSnapshot {
         }
         if let Some(p) = &self.video_path {
             out.push_str(&format!("video.path={}\n", p.display()));
+        }
+        if !self.font_ui.is_empty() {
+            out.push_str(&format!("font.ui={}\n", self.font_ui));
+        }
+        if !self.font_mono.is_empty() {
+            out.push_str(&format!("font.mono={}\n", self.font_mono));
         }
         out
     }
@@ -411,6 +432,8 @@ impl SettingsSnapshot {
                 "video.path" => {
                     snap.video_path = (!val.is_empty()).then(|| PathBuf::from(val));
                 }
+                "font.ui" => snap.font_ui = val.to_string(),
+                "font.mono" => snap.font_mono = val.to_string(),
                 _ => {} // 未知键忽略
             }
         }
@@ -444,6 +467,8 @@ struct BgToolApp {
     dark: Slot,
     light: Slot,
     video_path: Option<PathBuf>,
+    font_ui: String,
+    font_mono: String,
     side_alpha: f32,
     panel_alpha: f32,
     log: String,
@@ -468,6 +493,8 @@ impl BgToolApp {
             dark: Slot::new(0.80),
             light: Slot::new(0.78),
             video_path: None,
+            font_ui: String::new(),
+            font_mono: String::new(),
             side_alpha: 0.55,
             panel_alpha: 0.25,
             log: String::new(),
@@ -514,6 +541,8 @@ impl BgToolApp {
             light_alpha: self.light.alpha,
             light_crop: self.light.crop,
             video_path: self.video_path.clone(),
+            font_ui: self.font_ui.clone(),
+            font_mono: self.font_mono.clone(),
         }
     }
 
@@ -521,6 +550,8 @@ impl BgToolApp {
         self.install_path = s.install_path.clone();
         self.side_alpha = s.side_alpha;
         self.panel_alpha = s.panel_alpha;
+        self.font_ui = s.font_ui.clone();
+        self.font_mono = s.font_mono.clone();
         let msgs = [
             Self::restore_slot(&mut self.dark, &s.dark_path, s.dark_alpha, s.dark_crop, ctx),
             Self::restore_slot(&mut self.light, &s.light_path, s.light_alpha, s.light_crop, ctx),
@@ -760,28 +791,33 @@ impl BgToolApp {
                 None
             }
         };
-        let patch = match build_patch(
-            dark.as_ref().map(|t| (t.b64.as_str(), self.dark.alpha, t.mime)),
-            light.as_ref().map(|t| (t.b64.as_str(), self.light.alpha, t.mime)),
-            self.side_alpha,
-            self.panel_alpha,
-        ) {
-            // 视频激活但图片槽全空：仍要下发透明化+遮罩变量补丁（无图版），
-            // 否则补丁被清空后界面恢复不透明背景，白底盖住视频层
-            None if video_name.is_some() => Some(build_video_patch(
+        // 图片槽全空时：视频激活必须走带透明化规则的纯视频补丁（否则界面恢复不透明底，
+        // 白底盖住视频层）；无视频则 build_patch 只产出字体块或 None（不透明化界面）
+        let patch = if dark.is_none() && light.is_none() && video_name.is_some() {
+            Some(build_video_patch(
                 self.dark.alpha,
                 self.light.alpha,
                 self.side_alpha,
                 self.panel_alpha,
-            )),
-            other => other,
+                &self.font_ui,
+                &self.font_mono,
+            ))
+        } else {
+            build_patch(
+                dark.as_ref().map(|t| (t.b64.as_str(), self.dark.alpha, t.mime)),
+                light.as_ref().map(|t| (t.b64.as_str(), self.light.alpha, t.mime)),
+                self.side_alpha,
+                self.panel_alpha,
+                &self.font_ui,
+                &self.font_mono,
+            )
         };
         match apply_patch(&root, patch.as_deref()) {
             Ok(css) => {
                 if patch.is_some() {
                     self.log_push(&format!("补丁已写入: {}", css.display()));
                 } else {
-                    self.log_push("两个槽位均为空，已移除补丁（纯还原）");
+                    self.log_push("图片/视频/字体均未设置，已移除补丁（纯还原）");
                 }
                 match write_hot_files(&dist, patch.as_deref().unwrap_or(""), video_name.as_deref()) {
                     Ok(_) => {
@@ -1286,13 +1322,53 @@ fn strip_patch(css: &str) -> String {
     out
 }
 
+/// 字体名消毒：剔除会破坏 CSS 的字符（引号/反斜杠/花括号/尖括号/分号/斜杠/星号/圆括号/控制字符）。
+/// 目的是让字体名只能作为一条合法的 font-family 名字出现，无法闭合声明或注入规则。
+fn sanitize_font_name(name: &str) -> String {
+    name.chars()
+        .filter(|c| {
+            !c.is_control()
+                && !matches!(
+                    c,
+                    '"' | '\'' | '\\' | '{' | '}' | '<' | '>' | ';' | '/' | '*' | '(' | ')'
+                )
+        })
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+/// 字体覆盖块（与主题无关，dark/light 共用，不分主题镜像）。
+/// 两个字体名都为空（或消毒后为空）时返回 None。
+fn build_font_block(font_ui: &str, font_mono: &str) -> Option<String> {
+    let ui = sanitize_font_name(font_ui);
+    let mono = sanitize_font_name(font_mono);
+    if ui.is_empty() && mono.is_empty() {
+        return None;
+    }
+    let mut out = String::from("/* 字体覆盖 */\n");
+    if !ui.is_empty() {
+        out.push_str(&FONT_UI_TEMPLATE.replace("{FONT_UI}", &ui));
+    }
+    if !mono.is_empty() {
+        out.push_str(&FONT_MONO_TEMPLATE.replace("{FONT_MONO}", &mono));
+    }
+    Some(out)
+}
+
+/// 组装补丁：dark/light 图片透明化块（各自可选）→ 字体块（可选）→ 结束标记。
+/// 图片槽全空但设置了字体时只产出字体块（不加透明化规则——只改字体的用户不一定要壁纸）；
+/// 图片与字体全空则返回 None（纯还原）。
 fn build_patch(
     dark: Option<(&str, f32, &str)>,
     light: Option<(&str, f32, &str)>,
     side_alpha: f32,
     panel_alpha: f32,
+    font_ui: &str,
+    font_mono: &str,
 ) -> Option<String> {
-    if dark.is_none() && light.is_none() {
+    let font_block = build_font_block(font_ui, font_mono);
+    if dark.is_none() && light.is_none() && font_block.is_none() {
         return None;
     }
     let sa = format!("{side_alpha:.2}");
@@ -1319,13 +1395,23 @@ fn build_patch(
                 .replace("{MIME}", mime),
         );
     }
+    if let Some(fb) = font_block {
+        out.push_str(&fb);
+    }
     out.push_str("/* === kimi-wallpaper-patch end === */\n");
     Some(out)
 }
 
 /// 仅视频背景（图片槽全空）时的补丁：透明化规则 + 遮罩变量，无图片背景。
-/// 否则界面恢复不透明底，盖住 z-index:-2 的视频层（白屏）。
-fn build_video_patch(dark_alpha: f32, light_alpha: f32, side_alpha: f32, panel_alpha: f32) -> String {
+/// 否则界面恢复不透明底，盖住 z-index:-2 的视频层（白屏）。字体块照常追加。
+fn build_video_patch(
+    dark_alpha: f32,
+    light_alpha: f32,
+    side_alpha: f32,
+    panel_alpha: f32,
+    font_ui: &str,
+    font_mono: &str,
+) -> String {
     let mut out = String::from(PATCH_HEADER);
     out.push('\n');
     out.push_str(
@@ -1335,6 +1421,9 @@ fn build_video_patch(dark_alpha: f32, light_alpha: f32, side_alpha: f32, panel_a
             .replace("{SA}", &format!("{side_alpha:.2}"))
             .replace("{PA}", &format!("{panel_alpha:.2}")),
     );
+    if let Some(fb) = build_font_block(font_ui, font_mono) {
+        out.push_str(&fb);
+    }
     out.push_str("/* === kimi-wallpaper-patch end === */\n");
     out
 }
@@ -2616,7 +2705,38 @@ impl eframe::App for BgToolApp {
 
                     ui.add_space(10.0);
 
-                    // 6. 操作行
+                    // 6. 界面字体卡片（方案 B：只改字体名，不部署字体文件）
+                    card(ui, "界面字体", |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("界面字体");
+                            let w = (ui.available_width() - 16.0).max(120.0);
+                            ui.add_sized(
+                                [w, 22.0],
+                                egui::TextEdit::singleline(&mut self.font_ui)
+                                    .hint_text("如：Microsoft YaHei、霞鹜文楷（留空用默认）"),
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("代码字体");
+                            let w = (ui.available_width() - 16.0).max(120.0);
+                            ui.add_sized(
+                                [w, 22.0],
+                                egui::TextEdit::singleline(&mut self.font_mono)
+                                    .hint_text("如：Cascadia Code、Consolas（留空用默认）"),
+                            );
+                        });
+                        ui.label(
+                            egui::RichText::new(
+                                "填 Windows 已安装的字体名，应用热更新后即时生效；留空恢复默认",
+                            )
+                            .size(12.0)
+                            .color(C_MUTED),
+                        );
+                    });
+
+                    ui.add_space(10.0);
+
+                    // 7. 操作行
                     ui.horizontal(|ui| {
                         let apply_btn =
                             egui::Button::new(egui::RichText::new("应用补丁").strong().color(egui::Color32::WHITE))
@@ -2655,7 +2775,7 @@ impl eframe::App for BgToolApp {
 
                     ui.add_space(10.0);
 
-                    // 7. 日志卡片
+                    // 8. 日志卡片
                     card(ui, "日志", |ui| {
                         egui::ScrollArea::vertical()
                             .stick_to_bottom(true)
@@ -2774,7 +2894,7 @@ mod tests {
         assert!(p.orig_len > 0 && p.comp_len > 0);
         assert!(!p.b64.is_empty());
 
-        let patch = build_patch(Some((&p.b64, 0.80, "image/jpeg")), None, 0.55, 0.25).unwrap();
+        let patch = build_patch(Some((&p.b64, 0.80, "image/jpeg")), None, 0.55, 0.25, "", "").unwrap();
         apply_patch(&root, Some(&patch)).unwrap();
 
         let bak = backup_path(&css_path);
@@ -2796,7 +2916,7 @@ mod tests {
         assert!(css.contains("@media (prefers-color-scheme:dark)"));
 
         // 再次应用：不重复追加补丁段，备份不被覆盖
-        let patch2 = build_patch(Some((&p.b64, 0.80, "image/jpeg")), None, 0.55, 0.25).unwrap();
+        let patch2 = build_patch(Some((&p.b64, 0.80, "image/jpeg")), None, 0.55, 0.25, "", "").unwrap();
         apply_patch(&root, Some(&patch2)).unwrap();
         let css2 = fs::read_to_string(&css_path).unwrap();
         assert_eq!(css2.matches(PATCH_HEADER).count(), 1, "重复应用不应产生重复补丁段");
@@ -2813,7 +2933,15 @@ mod tests {
         let d = process_image(&dark_png, None).unwrap();
         let l = process_image(&light_png, None).unwrap();
 
-        let patch = build_patch(Some((&d.b64, 0.80, "image/jpeg")), Some((&l.b64, 0.78, "image/jpeg")), 0.55, 0.25).unwrap();
+        let patch = build_patch(
+            Some((&d.b64, 0.80, "image/jpeg")),
+            Some((&l.b64, 0.78, "image/jpeg")),
+            0.55,
+            0.25,
+            "",
+            "",
+        )
+        .unwrap();
         apply_patch(&root, Some(&patch)).unwrap();
 
         let css = fs::read_to_string(&css_path).unwrap();
@@ -2831,7 +2959,7 @@ mod tests {
 
     #[test]
     fn test_patch_fixed_cover() {
-        let patch = build_patch(Some((&"x".repeat(8), 0.80, "image/jpeg")), None, 0.55, 0.25).unwrap();
+        let patch = build_patch(Some((&"x".repeat(8), 0.80, "image/jpeg")), None, 0.55, 0.25, "", "").unwrap();
         assert!(patch.contains("background-size:cover,cover"));
         assert!(patch.contains("background-position:center,center"));
         assert!(!patch.contains("{BS}") && !patch.contains("{BP}"), "不应再有填充模式占位符");
@@ -2843,7 +2971,7 @@ mod tests {
         let img_path = root.join("dark.png");
         make_test_image(&img_path);
         let p = process_image(&img_path, None).unwrap();
-        let patch = build_patch(Some((&p.b64, 0.80, "image/jpeg")), None, 0.55, 0.25).unwrap();
+        let patch = build_patch(Some((&p.b64, 0.80, "image/jpeg")), None, 0.55, 0.25, "", "").unwrap();
         apply_patch(&root, Some(&patch)).unwrap();
         assert!(fs::read_to_string(&css_path).unwrap().contains(PATCH_START));
 
@@ -3046,9 +3174,11 @@ mod tests {
             light_alpha: 0.78,
             light_crop: None,
             video_path: None,
+            font_ui: "霞鹜文楷".to_string(),
+            font_mono: "Cascadia Code".to_string(),
         };
         let back = SettingsSnapshot::from_conf(&s.to_conf());
-        assert_eq!(back, s, "含 crop 的完整快照应 round-trip（含中文/空格/= 路径）");
+        assert_eq!(back, s, "含 crop/字体的完整快照应 round-trip（含中文/空格/= 路径）");
     }
 
     #[test]
@@ -3064,6 +3194,8 @@ mod tests {
             light_alpha: 0.70,
             light_crop: Some(CropRect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 }),
             video_path: Some(PathBuf::from("F:\\视频\\bg.mp4")),
+            font_ui: String::new(),
+            font_mono: String::new(),
         };
         let back = SettingsSnapshot::from_conf(&s.to_conf());
         assert_eq!(back.dark_path, s.dark_path);
@@ -3101,6 +3233,38 @@ light.crop=,,
         assert_eq!(s.dark_path, None, "空 path 应为 None");
         assert_eq!(s.light_crop, None);
         assert!((s.light_alpha - 0.78).abs() < 1e-6);
+        assert_eq!(s.font_ui, "", "缺 font.ui 行应为空串");
+        assert_eq!(s.font_mono, "", "缺 font.mono 行应为空串");
+    }
+
+    #[test]
+    fn test_conf_font_keys() {
+        let s = SettingsSnapshot {
+            font_ui: "Microsoft YaHei".to_string(),
+            font_mono: "Consolas".to_string(),
+            ..Default::default()
+        };
+        let text = s.to_conf();
+        assert!(text.contains("font.ui=Microsoft YaHei\n"), "应写 font.ui 行: {text}");
+        assert!(text.contains("font.mono=Consolas\n"), "应写 font.mono 行: {text}");
+        let back = SettingsSnapshot::from_conf(&text);
+        assert_eq!(back.font_ui, "Microsoft YaHei");
+        assert_eq!(back.font_mono, "Consolas");
+
+        // 只设一个：另一个不写行
+        let only_ui = SettingsSnapshot {
+            font_ui: "霞鹜文楷".to_string(),
+            ..Default::default()
+        };
+        assert!(only_ui.to_conf().contains("font.ui=霞鹜文楷"));
+        assert!(!only_ui.to_conf().contains("font.mono"));
+
+        // 都为空 → 不写行（保持旧 conf 兼容）
+        assert!(!SettingsSnapshot::default().to_conf().contains("font."));
+        // 空值行按未设置处理，不 panic
+        let empty_lines = SettingsSnapshot::from_conf("font.ui=\nfont.mono=\n");
+        assert_eq!(empty_lines.font_ui, "");
+        assert_eq!(empty_lines.font_mono, "");
     }
 
     #[test]
@@ -3131,14 +3295,14 @@ light.crop=,,
 
     #[test]
     fn test_build_patch_mime_placeholder() {
-        let gif_patch = build_patch(Some(("QUJD", 0.80, "image/gif")), None, 0.55, 0.25).unwrap();
+        let gif_patch = build_patch(Some(("QUJD", 0.80, "image/gif")), None, 0.55, 0.25, "", "").unwrap();
         assert!(
             gif_patch.contains("data:image/gif;base64,QUJD"),
             "GIF 槽应输出 data:image/gif"
         );
         assert!(!gif_patch.contains("data:image/jpeg;base64,QUJD"));
 
-        let jpg_patch = build_patch(Some(("QUJD", 0.80, "image/jpeg")), None, 0.55, 0.25).unwrap();
+        let jpg_patch = build_patch(Some(("QUJD", 0.80, "image/jpeg")), None, 0.55, 0.25, "", "").unwrap();
         assert!(jpg_patch.contains("data:image/jpeg;base64,QUJD"));
         assert!(!jpg_patch.contains("{MIME}"), "{{MIME}} 占位符应被全部替换");
     }
@@ -3150,6 +3314,8 @@ light.crop=,,
             Some(("l", 0.78, "image/jpeg")),
             0.55,
             0.25,
+            "",
+            "",
         )
         .unwrap();
         assert_eq!(patch.matches("--kimi-wallpaper-mask").count(), 4, "dark/light × scheme/system 共 4 条遮罩变量规则");
@@ -3168,7 +3334,7 @@ light.crop=,,
 
     #[test]
     fn test_build_video_patch() {
-        let patch = build_video_patch(0.80, 0.78, 0.55, 0.25);
+        let patch = build_video_patch(0.80, 0.78, 0.55, 0.25, "", "");
         assert!(patch.starts_with(PATCH_HEADER), "应含补丁头");
         assert!(patch.contains("/* === kimi-wallpaper-patch end === */"));
         // 透明化规则 + 遮罩变量齐全（dark/light × scheme/system 共 4 条），且无图片背景
@@ -3201,6 +3367,142 @@ light.crop=,,
         assert_eq!(css.matches(PATCH_HEADER).count(), 1);
         apply_patch(&root, None).unwrap();
         assert_eq!(fs::read_to_string(&css_path).unwrap(), ORIG_CSS, "移除补丁后应还原原版");
+    }
+
+    // ---------- 字体覆盖 ----------
+
+    #[test]
+    fn test_sanitize_font_name() {
+        // 正常字体名（含中文/空格/连字符/点号）原样保留
+        assert_eq!(sanitize_font_name("霞鹜文楷"), "霞鹜文楷");
+        assert_eq!(sanitize_font_name("Microsoft YaHei"), "Microsoft YaHei");
+        assert_eq!(sanitize_font_name("Cascadia Code"), "Cascadia Code");
+        assert_eq!(sanitize_font_name("  Consolas  "), "Consolas", "首尾空白应剔除");
+        // 会破坏 CSS 的字符全部剔除（引号/反斜杠/花括号/尖括号/分号/斜杠/星号/圆括号/控制字符）
+        let evil = "Evil\";}</style><script>alert(1)</script>\n{color:red}";
+        let clean = sanitize_font_name(evil);
+        for bad in ['"', '\'', '\\', '{', '}', '<', '>', ';', '/', '*', '(', ')'] {
+            assert!(!clean.contains(bad), "消毒后不应残留 {bad:?}: {clean}");
+        }
+        assert!(!clean.chars().any(|c| c.is_control()), "不应残留控制字符: {clean}");
+        assert_eq!(clean, "Evilstylescriptalert1scriptcolor:red", "只删危险字符，其余原样保留");
+        // 全是危险字符 → 空串
+        assert_eq!(sanitize_font_name("\";}{<>"), "");
+        assert_eq!(sanitize_font_name("   "), "");
+    }
+
+    #[test]
+    fn test_build_font_block_states() {
+        // 两空 → None（未设置字体）
+        assert!(build_font_block("", "").is_none());
+        assert!(build_font_block("   ", "\t").is_none(), "纯空白应视为未设置");
+
+        // 仅界面字体：只出 UI 规则
+        let ui = build_font_block("霞鹜文楷", "").unwrap();
+        assert!(ui.contains("/* 字体覆盖 */"));
+        assert!(ui.contains("--font-ui-latin:\"霞鹜文楷\",\"Helvetica Neue\",Arial"));
+        assert!(ui.contains("--font-ui:var(--font-ui-latin)"));
+        assert!(ui.contains("--sans:var(--font-ui)"));
+        assert!(ui.contains("--font-display:var(--font-ui)"));
+        assert!(ui.contains("--markdown-font-family:var(--font-ui)"));
+        assert!(!ui.contains("--font-mono"), "未设置代码字体时不应产出 mono 规则");
+
+        // 仅代码字体：只出 mono 规则
+        let mono = build_font_block("", "Cascadia Code").unwrap();
+        assert!(mono.contains("--font-mono:\"Cascadia Code\",\"JetBrains Mono Variable\""));
+        assert!(mono.contains("--mono:var(--font-mono)"));
+        assert!(mono.contains("--markdown-code-font-family:var(--font-mono)"));
+        assert!(!mono.contains("--font-ui"), "未设置界面字体时不应产出 UI 规则");
+
+        // 两个都设置：两条规则都在，占位符全替换，:root:root 提特异性
+        let both = build_font_block("Microsoft YaHei", "Consolas").unwrap();
+        assert!(both.contains("--font-ui-latin:\"Microsoft YaHei\""));
+        assert!(both.contains("--font-mono:\"Consolas\""));
+        assert!(!both.contains("{FONT_UI}") && !both.contains("{FONT_MONO}"), "占位符应全部替换");
+        assert_eq!(both.matches(":root:root{").count(), 2, "两条规则各自用 :root:root");
+    }
+
+    #[test]
+    fn test_build_font_block_sanitizes_injection() {
+        // 注入尝试：消毒后只剩合法字体名，花括号数量仍与模板一致（无法闭合声明/新增规则）
+        let blk = build_font_block("Evil\";}html{background:red}", "").unwrap();
+        assert!(blk.contains("--font-ui-latin:\"Evilhtmlbackground:red\""));
+        assert_eq!(blk.matches('{').count(), 1, "注入不应带出额外规则块");
+        assert_eq!(blk.matches('}').count(), 1);
+        // 消毒后为空 → 等同未设置
+        assert!(build_font_block("\";}{", "").is_none());
+    }
+
+    #[test]
+    fn test_build_patch_font_only() {
+        let patch = build_patch(None, None, 0.55, 0.25, "霞鹜文楷", "Cascadia Code").unwrap();
+        assert!(patch.starts_with(PATCH_HEADER), "应含补丁头");
+        assert!(patch.ends_with("/* === kimi-wallpaper-patch end === */\n"), "应含结束标记");
+        assert!(patch.contains("--font-ui-latin:\"霞鹜文楷\""));
+        assert!(patch.contains("--font-mono:\"Cascadia Code\""));
+        // 只改字体不应附带透明化规则（只改字体的用户不一定要壁纸）
+        assert!(!patch.contains("--kimi-wallpaper-dark"));
+        assert!(!patch.contains("--kimi-wallpaper-light"));
+        assert!(!patch.contains("--kimi-wallpaper-mask"));
+        assert!(!patch.contains("background:transparent"));
+        assert!(!patch.contains(".sidebar-actions"));
+        assert_eq!(patch.matches(PATCH_HEADER).count(), 1);
+
+        // 落盘：字体补丁可写入，清空后可精确还原
+        let (root, css_path) = make_fixture("font-only");
+        apply_patch(&root, Some(&patch)).unwrap();
+        let css = fs::read_to_string(&css_path).unwrap();
+        assert!(css.contains(PATCH_HEADER) && css.contains("--font-ui-latin"));
+        apply_patch(&root, None).unwrap();
+        assert_eq!(fs::read_to_string(&css_path).unwrap(), ORIG_CSS, "移除补丁后应还原原版");
+    }
+
+    #[test]
+    fn test_build_patch_image_plus_font() {
+        let patch = build_patch(
+            Some(("QUJD", 0.80, "image/jpeg")),
+            None,
+            0.55,
+            0.25,
+            "Microsoft YaHei",
+            "",
+        )
+        .unwrap();
+        assert!(patch.contains("--kimi-wallpaper-dark"), "图片透明化规则应保留");
+        assert!(patch.contains("--kimi-wallpaper-mask"));
+        assert!(patch.contains("--font-ui-latin:\"Microsoft YaHei\""), "字体块应一并产出");
+        assert!(!patch.contains("--font-mono"));
+        // 顺序：图片块 → 字体块 → 结束标记
+        let img_at = patch.find("--kimi-wallpaper-dark").unwrap();
+        let font_at = patch.find("--font-ui-latin").unwrap();
+        let end_at = patch.find(PATCH_END_MARK).unwrap();
+        assert!(img_at < font_at && font_at < end_at, "字体块应在图片块之后、结束标记之前");
+    }
+
+    #[test]
+    fn test_build_patch_all_empty_none() {
+        assert!(build_patch(None, None, 0.55, 0.25, "", "").is_none(), "图/字全空应返回 None");
+        assert!(
+            build_patch(None, None, 0.55, 0.25, "\";}{", "").is_none(),
+            "消毒后为空的字体名等同未设置"
+        );
+    }
+
+    #[test]
+    fn test_build_video_patch_with_font() {
+        let patch = build_video_patch(0.80, 0.78, 0.55, 0.25, "霞鹜文楷", "");
+        assert!(patch.contains("--kimi-wallpaper-mask"), "透明化/遮罩规则不应因字体被挤掉");
+        assert!(patch.contains("background:transparent !important"));
+        assert!(patch.contains("--font-ui-latin:\"霞鹜文楷\""));
+        assert!(!patch.contains("--font-mono"));
+        // 顺序：遮罩/透明化规则 → 字体块 → 结束标记
+        let mask_at = patch.find("--kimi-wallpaper-mask").unwrap();
+        let font_at = patch.find("--font-ui-latin").unwrap();
+        let end_at = patch.find(PATCH_END_MARK).unwrap();
+        assert!(mask_at < font_at && font_at < end_at, "字体块应在遮罩规则之后、结束标记之前");
+        // 未设置字体时不应出现字体块
+        let plain = build_video_patch(0.80, 0.78, 0.55, 0.25, "", "");
+        assert!(!plain.contains("--font-ui") && !plain.contains("--font-mono"));
     }
 
     #[test]
@@ -3837,6 +4139,8 @@ light.crop=,,
             dark: Slot::new(0.80),
             light: Slot::new(0.78),
             video_path: None,
+            font_ui: String::new(),
+            font_mono: String::new(),
             side_alpha: 0.55,
             panel_alpha: 0.25,
             log: String::new(),
@@ -3898,5 +4202,38 @@ light.crop=,,
             "文件缺失的残留不应警告:\n{}",
             app.log
         );
+    }
+
+    #[test]
+    fn test_do_apply_font_only_writes_patch() {
+        let (root, css_path) = make_fixture("font-apply");
+        let dist = root.join("resources").join("desktop-dist");
+
+        // 仅设字体（无图无视频）：应写入只含字体块的补丁，且不下发透明化规则
+        let mut app = test_app(&root);
+        app.font_ui = "霞鹜文楷".to_string();
+        app.font_mono = "Cascadia Code".to_string();
+        app.do_apply();
+
+        let css = fs::read_to_string(&css_path).unwrap();
+        assert!(css.contains(PATCH_HEADER), "仅字体也应写入补丁:\n{css}");
+        assert!(css.contains("--font-ui-latin:\"霞鹜文楷\""));
+        assert!(css.contains("--font-mono:\"Cascadia Code\""));
+        assert!(!css.contains("--kimi-wallpaper-dark"), "仅字体不应附带透明化规则");
+        assert!(app.log.contains("补丁已写入"), "日志应记录写入:\n{}", app.log);
+        // 热更 css 应同步为同一份补丁全文（探针 2 秒内拉到）
+        assert_eq!(fs::read_to_string(hot_css_path(&dist)).unwrap(), css_patch_section(&css));
+
+        // 清空字体后再应用：无图/无视频/无字体 → 纯还原
+        let mut app2 = test_app(&root);
+        app2.do_apply();
+        assert_eq!(fs::read_to_string(&css_path).unwrap(), ORIG_CSS, "无任何配置应纯还原");
+        assert!(app2.log.contains("已移除补丁（纯还原）"), "日志应为纯还原:\n{}", app2.log);
+    }
+
+    /// 从写了补丁的样式表里取出补丁段（PATCH_START 起到文件尾），便于与热更 css 比对。
+    fn css_patch_section(css: &str) -> String {
+        let start = css.find(PATCH_START).expect("样式表应含补丁段");
+        css[start..].to_string()
     }
 }

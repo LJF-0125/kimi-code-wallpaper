@@ -1,6 +1,6 @@
 # kimi-code-wallpaper (kimi-bg-tool)
 
-Kimi Code 桌面应用的自定义背景工具：图片、GIF 动图、MP4 视频都能当背景，选好点「应用补丁」，运行中的 Kimi Code 约 2 秒自动换装。深色（月之暗面）、浅色（月之亮面）两种主题各自独立配置。
+Kimi Code 桌面应用的自定义背景/字体工具：图片、GIF 动图、MP4 视频当背景，界面字体、代码字体随心换，选好点「应用补丁」，运行中的 Kimi Code 约 2 秒自动换装。深色（月之暗面）、浅色（月之亮面）两种主题各自独立配置。
 
 > **免责声明**：本工具是非官方第三方工具，与月之暗面（Moonshot AI）无关。"Kimi Code" 名称仅用于描述兼容对象。
 
@@ -17,6 +17,8 @@ Kimi Code 桌面应用的自定义背景工具：图片、GIF 动图、MP4 视�
   - 版本化部署文件名，播放中也能直接换视频，不用先还原
 - **内置裁剪编辑器**：非 16:9 图片可红框拖拽裁剪（16:9 / 21:9 / 自由比例），宽屏不再被放大裁脸
 - **三档透明度调节**：遮罩透明度（压在背景上保证文字可读）、侧边栏/标题栏透明度、面板透明度（右侧文件预览/侧边聊天面板）
+- **界面/代码字体修改**：下拉框枚举 Windows 全部已装字体（输入即过滤，也可直接手填任意字体名），界面字体与代码字体分开设置；留空即用应用默认
+- **导入本地字体文件**：TTF/WOFF/WOFF2 直接导入（OTF 因应用协议白名单限制不支持），版本化部署 + `@font-face` 注入，随热更新即时生效；>8MB 有体积警告
 - **热更新**：安装探针后打补丁约 2 秒就地生效，无需重启应用
 - **一键还原原版**：首次打补丁前自动备份原样式表（`.wallpaper-bak`），随时反悔
 - **配置自动保存**：选项记忆在 exe 旁的 `kimi-bg-tool.conf`，下次启动直接恢复
@@ -26,7 +28,7 @@ Kimi Code 桌面应用的自定义背景工具：图片、GIF 动图、MP4 视�
 1. 从 [Releases](https://github.com/LJF-0125/kimi-code-wallpaper/releases) 下载 `kimi-bg-tool.exe`（或自行构建，见下），双击运行，免安装
 2. 确认识别出的安装路径正确（不对就点「浏览…」/「选 exe…」手动选）
 3. 点 **安装热更新**（一次性操作），然后**完全退出并重启 Kimi Code 一次**——此后探针永久生效
-4. 选图片（可选裁剪）或选视频，拖好透明度滑块
+4. 选图片（可选裁剪）或选视频，拖好透明度滑块；（可选）「界面字体」卡里下拉选系统字体或「选文件…」导入字体文件
 5. 点 **应用补丁**，运行中的 Kimi Code 约 2 秒内自动换装，无需再重启
 
 > 不装热更新也能用：直接跳到第 4 步，但每次打补丁都要重启 Kimi Code 才生效。
@@ -54,6 +56,10 @@ Kimi Code 桌面应用是 Electron + Vue，渲染层是散文件（`resources\de
 
 CSS 做不了视频背景，由探针动态注入：json 里有视频文件名时，探针在 body 里建 `<video>` 元素（z-index: -2，静音循环）+ 遮罩 div（z-index: -1）。由于 `app://` 协议对 mp4 返回 `application/octet-stream` 且不支持 Range 请求（Chromium 媒体栈直接拒播），探针改为 fetch 读成 blob 再喂给播放器，绕开协议层。视频文件以版本化文件名（`kimi-wallpaper-video-<时间戳>.mp4`）部署，避开 Windows 对正在播放文件的占用锁，旧文件惰性清理。
 
+### 字体修改原理
+
+应用的界面文字全部走 CSS 变量（`--font-ui` 界面字体 / `--font-mono` 代码字体，另有 `--sans`、`--markdown-font-family` 等别名），补丁只需在 `:root` 重定义这两个变量即全界面生效——不逐条覆盖，不碰字号（应用自带字号设置不受影响），也不影响 KaTeX 数学公式字体。导入字体文件时，文件以版本化文件名（`kimi-wallpaper-font-{ui|mono}-<时间戳>`）复制进 `desktop-dist`，补丁里用 `@font-face` + 绝对路径引用（应用自身加载内置字体就是同一条链路），随热更新 CSS 一起即时生效，旧文件惰性清理。
+
 ## 当前限制
 
 - Kimi Code 大版本更新后若 CSS 类名变更，透明化规则可能需要跟进
@@ -67,7 +73,7 @@ CSS 做不了视频背景，由探针动态注入：json 里有视频文件名�
 cargo build --release
 # 产物：target\release\kimi-bg-tool.exe（约 7 MB）
 
-cargo test --release   # 37 个单元测试
+cargo test --release   # 53 个单元测试
 ```
 
 技术栈：Rust + [egui/eframe](https://github.com/emilk/egui)（GUI）、image（压图）、rfd（文件选择框）、winreg（安装路径探测）。MP4 的 faststart 重封装与音轨剥除为自实现（纯搬盒子，无 ffmpeg 依赖）。GUI 中文字体在启动时加载系统微软雅黑（`C:\Windows\Fonts\msyh.ttc`）。
